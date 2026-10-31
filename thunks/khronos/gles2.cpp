@@ -2428,6 +2428,8 @@ static std::map<std::pair<GLuint, GLuint>, BdDrawStat> g_draw_stats;
 static std::set<GLuint> g_census_fbos;
 static uint64_t g_draw_total = 0;
 
+static void bd_census_detail(GLuint program, GLuint fbo, GLsizei count);
+
 static void bd_census_draw(GLsizei count, GLsizei instances)
 {
     if (!bd_draw_census_enabled())
