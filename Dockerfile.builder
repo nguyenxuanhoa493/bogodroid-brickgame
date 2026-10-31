@@ -25,6 +25,8 @@ RUN printf '%s\n' \
       libsdl2-dev libgles2-mesa-dev libegl1-mesa-dev \
       libcurl4-openssl-dev libsecret-1-dev \
       libbsd-dev libmd-dev \
+      libavcodec-dev:arm64 libavformat-dev:arm64 libavutil-dev:arm64 \
+      libswscale-dev:arm64 libswresample-dev:arm64 \
       libsdl2-dev:arm64 libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 \
       libcurl4-openssl-dev:arm64 libsecret-1-dev:arm64 \
       libbsd-dev:arm64 libmd-dev:arm64 \
