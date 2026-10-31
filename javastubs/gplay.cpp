@@ -1,7 +1,9 @@
 #include "gplay.h"
+#include "javac.h"
 #include "jnibridge.h"
 #include "logging.h"
 #include "toml++/toml.hpp"
+#include <cstdlib>
 #include <typeinfo>
 
 // Only the Unity-based projects ship unity.h; the GameMaker/Limbo loaders
@@ -265,20 +267,49 @@ std::shared_ptr<jnivm::Object> BillingClientBuilder::buildErased()
     return std::static_pointer_cast<jnivm::Object>(std::make_shared<BillingClient>());
 }
 
+// Diagnostic switch for games whose boot waits on Unity IAP reaching
+// "connected": with BD_BILLING_OK=1 the store reports OK, isReady() is true and
+// the Billing 5 listener callbacks answer with empty product/purchase lists, so
+// initialization completes instead of retrying a store that cannot exist here.
+// Without the switch every call still reports "store unavailable" honestly.
+static bool bd_billing_ok()
+{
+    static const bool ok = std::getenv("BD_BILLING_OK") != nullptr;
+    return ok;
+}
+
+static std::shared_ptr<FakeJni::JObject> bd_empty_list()
+{
+    return std::static_pointer_cast<FakeJni::JObject>(
+        std::make_shared<jnivm::java::util::ArrayList>());
+}
+
+static std::shared_ptr<BillingResult> bd_ok_result(const char* message)
+{
+    auto result = std::make_shared<BillingResult>();
+    result->responseCode = 0; // BILLING_OK
+    result->debugMessage = std::make_shared<FakeJni::JString>(message);
+    return result;
+}
+
 void BillingClient::startConnection(std::shared_ptr<FakeJni::JObject> listener)
 {
     // No Play Store on this device. Report setup failure straight away: a
     // never-completing listener leaves Unity IAP awaiting a connection that
     // cannot happen, which is worse than an honest "store unavailable".
-    BD_LOG("GPLAY", "billing startConnection(%p): delivering BILLING_UNAVAILABLE", listener.get());
+    // (BD_BILLING_OK trades that honesty for a bootable game, see above.)
+    const bool ok = bd_billing_ok();
+    BD_LOG("GPLAY", "billing startConnection(%p): delivering %s", listener.get(),
+           ok ? "OK (BD_BILLING_OK)" : "BILLING_UNAVAILABLE");
     auto proxy = std::dynamic_pointer_cast<JNIBridgeProxy>(listener);
     if (!proxy) {
         if (listener)
             BD_LOG("GPLAY", "billing listener is %s, not a proxy", typeid(*listener).name());
         return;
     }
-    auto result = std::make_shared<BillingResult>();
-    result->debugMessage = std::make_shared<FakeJni::JString>("offline: no Play Store");
+    auto result = ok ? bd_ok_result("offline stub: store ready")
+                     : std::make_shared<BillingResult>();
+    if (!ok) result->debugMessage = std::make_shared<FakeJni::JString>("offline: no Play Store");
     proxy->deliver("com/android/billingclient/api/BillingClientStateListener",
                    "onBillingSetupFinished",
                    "(Lcom/android/billingclient/api/BillingResult;)V", result);
@@ -286,34 +317,67 @@ void BillingClient::startConnection(std::shared_ptr<FakeJni::JObject> listener)
 
 bool BillingClient::isReady()
 {
-    return false;
+    return bd_billing_ok();
 }
 
 void BillingClient::endConnection() {}
 
-void BillingClient::queryPurchasesAsync(std::shared_ptr<FakeJni::JObject>, std::shared_ptr<FakeJni::JObject>)
+void BillingClient::queryPurchasesAsync(std::shared_ptr<FakeJni::JObject>,
+                                        std::shared_ptr<FakeJni::JObject> listener)
 {
-    BD_LOG("GPLAY", "billing queryPurchasesAsync ignored");
+    if (!bd_billing_ok()) { BD_LOG("GPLAY", "billing queryPurchasesAsync ignored"); return; }
+    auto proxy = std::dynamic_pointer_cast<JNIBridgeProxy>(listener);
+    if (!proxy) { BD_LOG("GPLAY", "queryPurchases listener is not a proxy"); return; }
+    BD_LOG("GPLAY", "billing queryPurchasesAsync -> empty list");
+    proxy->deliver("com/android/billingclient/api/PurchasesResponseListener",
+                   "onQueryPurchasesResponse",
+                   "(Lcom/android/billingclient/api/BillingResult;Ljava/util/List;)V",
+                   bd_ok_result("offline stub: no purchases"), bd_empty_list());
 }
 
-void BillingClient::queryProductDetailsAsync(std::shared_ptr<FakeJni::JObject>, std::shared_ptr<FakeJni::JObject>)
+void BillingClient::queryProductDetailsAsync(std::shared_ptr<FakeJni::JObject>,
+                                             std::shared_ptr<FakeJni::JObject> listener)
 {
-    BD_LOG("GPLAY", "billing queryProductDetailsAsync ignored");
+    if (!bd_billing_ok()) { BD_LOG("GPLAY", "billing queryProductDetailsAsync ignored"); return; }
+    auto proxy = std::dynamic_pointer_cast<JNIBridgeProxy>(listener);
+    if (!proxy) { BD_LOG("GPLAY", "product details listener is not a proxy"); return; }
+    BD_LOG("GPLAY", "billing queryProductDetailsAsync -> empty list");
+    proxy->deliver("com/android/billingclient/api/ProductDetailsResponseListener",
+                   "onProductDetailsResponse",
+                   "(Lcom/android/billingclient/api/BillingResult;Ljava/util/List;)V",
+                   bd_ok_result("offline stub: no products"), bd_empty_list());
 }
 
-void BillingClient::acknowledgePurchase(std::shared_ptr<FakeJni::JObject>, std::shared_ptr<FakeJni::JObject>)
+void BillingClient::acknowledgePurchase(std::shared_ptr<FakeJni::JObject>,
+                                        std::shared_ptr<FakeJni::JObject> listener)
 {
-    BD_LOG("GPLAY", "billing acknowledgePurchase ignored");
+    if (!bd_billing_ok()) { BD_LOG("GPLAY", "billing acknowledgePurchase ignored"); return; }
+    auto proxy = std::dynamic_pointer_cast<JNIBridgeProxy>(listener);
+    if (!proxy) return;
+    proxy->deliver("com/android/billingclient/api/AcknowledgePurchaseResponseListener",
+                   "onAcknowledgePurchaseResponse",
+                   "(Lcom/android/billingclient/api/BillingResult;)V",
+                   bd_ok_result("offline stub: acknowledged"));
 }
 
-void BillingClient::consumeAsync(std::shared_ptr<FakeJni::JObject>, std::shared_ptr<FakeJni::JObject>)
+void BillingClient::consumeAsync(std::shared_ptr<FakeJni::JObject>,
+                                 std::shared_ptr<FakeJni::JObject> listener)
 {
-    BD_LOG("GPLAY", "billing consumeAsync ignored");
+    if (!bd_billing_ok()) { BD_LOG("GPLAY", "billing consumeAsync ignored"); return; }
+    auto proxy = std::dynamic_pointer_cast<JNIBridgeProxy>(listener);
+    if (!proxy) return;
+    proxy->deliver("com/android/billingclient/api/ConsumeResponseListener",
+                   "onConsumeResponse",
+                   "(Lcom/android/billingclient/api/BillingResult;Ljava/lang/String;)V",
+                   bd_ok_result("offline stub: consumed"),
+                   std::static_pointer_cast<jnivm::java::lang::Object>(
+                       std::make_shared<FakeJni::JString>("")));
 }
 
 std::shared_ptr<BillingResult> BillingClient::launchBillingFlow(
     std::shared_ptr<jnivm::android::app::Activity>, std::shared_ptr<FakeJni::JObject>)
 {
+    if (bd_billing_ok()) { BD_LOG("GPLAY", "billing launchBillingFlow -> OK"); return bd_ok_result("offline stub"); }
     BD_LOG("GPLAY", "billing launchBillingFlow ignored");
     return std::make_shared<BillingResult>();
 }

@@ -74,6 +74,13 @@ void JNIBridgeProxy::deliver(const char* className, const char* methodName,
     invoke(className, methodName, methodSig, arg);
 }
 
+void JNIBridgeProxy::deliver(const char* className, const char* methodName,
+                             const char* methodSig,
+                             std::shared_ptr<jnivm::java::lang::Object> a,
+                             std::shared_ptr<jnivm::java::lang::Object> b) {
+    invoke(className, methodName, methodSig, a, b);
+}
+
 bool JNIBridgeProxy::handleMessage(std::shared_ptr<jnivm::android::os::Message> msg) {
     // Runtime check: does this instance actually implement Handler.Callback?
     if (implementedInterfaces.count("android/os/Handler$Callback")) {
@@ -341,6 +348,9 @@ template void JNIBridge::invoke(long, const char*, const char*, const char*,
                                 FakeJni::JInt,
                                 FakeJni::JInt);
 template void JNIBridge::invoke(long, const char*, const char*, const char*, FakeJni::JBoolean);
+template void JNIBridge::invoke(long, const char*, const char*, const char*,
+                                std::shared_ptr<jnivm::java::lang::Object>,
+                                std::shared_ptr<jnivm::java::lang::Object>); // (BillingResult, List)
 
 
 BEGIN_NATIVE_DESCRIPTOR(jnivm::bitter::jnibridge::JNIBridge) { FakeJni::Function<&JNIBridge::newInterfaceProxy> {}, "newInterfaceProxy", FakeJni::JMethodID::STATIC },

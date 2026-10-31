@@ -85,6 +85,13 @@ namespace bitter {
                          const char* methodSig,
                          std::shared_ptr<jnivm::java::lang::Object> arg);
 
+            // Two-argument callbacks (Billing 5 listeners take
+            // (BillingResult, List)).
+            void deliver(const char* className, const char* methodName,
+                         const char* methodSig,
+                         std::shared_ptr<jnivm::java::lang::Object> a,
+                         std::shared_ptr<jnivm::java::lang::Object> b);
+
             // --- Implementation of android.os.Handler.Callback ---
             bool handleMessage(std::shared_ptr<jnivm::android::os::Message> msg) override;
 
