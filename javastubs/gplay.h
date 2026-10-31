@@ -138,7 +138,7 @@ namespace com {
 
                     class AuthenticationResult : public FakeJni::JObject {
                     public:
-                        DEFINE_CLASS_NAME("com/google/android/gms/auth/api/signin/AuthenticationResult")
+                        DEFINE_CLASS_NAME("com/google/android/gms/games/AuthenticationResult")
                         // Offline device: the sign-in task succeeds but the
                         // player is not authenticated, so the Play Games plugin
                         // reports "not signed in" and the game proceeds.
