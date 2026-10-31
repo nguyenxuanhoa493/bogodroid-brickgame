@@ -2538,13 +2538,37 @@ static void bd_census_detail(GLuint program, GLuint fbo, GLsizei count)
     GLint scissor_box[4] = {0, 0, 0, 0};
     GLint src_rgb = 0;
     GLint dst_rgb = 0;
-    if (glad_glIsEnabled)
+    if (glad_glIsEnabled) {
         blend = glad_glIsEnabled(0x0BE2 /*GL_BLEND*/);
+        scissor = glad_glIsEnabled(0x0C11 /*GL_SCISSOR_TEST*/);
+    }
     if (glad_glGetIntegerv) {
         glad_glGetIntegerv(0x0C11 /*GL_SCISSOR_TEST*/, &scissor);
         glad_glGetIntegerv(0x0C10 /*GL_SCISSOR_BOX*/, scissor_box);
         glad_glGetIntegerv(0x80C9 /*GL_BLEND_SRC_RGB*/, &src_rgb);
         glad_glGetIntegerv(0x80C8 /*GL_BLEND_DST_RGB*/, &dst_rgb);
+    }
+    // A draw can run and still leave no trace: colour writes masked off, the
+    // quad culled back-facing, or a degenerate/NaN transform. Log all three so
+    // "the draw happened" is never mistaken for "the draw was visible".
+    GLboolean color_mask[4] = {1, 1, 1, 1};
+    if (glad_glGetBooleanv)
+        glad_glGetBooleanv(0x0C23 /*GL_COLOR_WRITEMASK*/, color_mask);
+    GLint depth_test = 0;
+    GLint cull_face = 0;
+    GLint front_face = 0x0901 /*GL_CCW*/;
+    GLint depth_func = 0;
+    GLint depth_mask = 1;
+    GLint viewport[4] = {0, 0, 0, 0};
+    if (glad_glIsEnabled) {
+        depth_test = glad_glIsEnabled(0x0B71 /*GL_DEPTH_TEST*/);
+        cull_face = glad_glIsEnabled(0x0B44 /*GL_CULL_FACE*/);
+        depth_mask = glad_glIsEnabled(0x0B72 /*GL_DEPTH_WRITEMASK*/);
+    }
+    if (glad_glGetIntegerv) {
+        glad_glGetIntegerv(0x0B46 /*GL_FRONT_FACE*/, &front_face);
+        glad_glGetIntegerv(0x0B74 /*GL_DEPTH_FUNC*/, &depth_func);
+        glad_glGetIntegerv(0x0BA2 /*GL_VIEWPORT*/, viewport);
     }
     BD_LOG("CENSUS",
            "detail program=%u fbo=%u count=%d tex=%d %dx%d fmt=0x%x color=%s "
@@ -2554,9 +2578,35 @@ static void bd_census_detail(GLuint program, GLuint fbo, GLsizei count)
            have_color ? "set" : "absent", (int)blend, (unsigned)src_rgb,
            (unsigned)dst_rgb, (int)scissor, (int)scissor_box[0],
            (int)scissor_box[1], (int)scissor_box[2], (int)scissor_box[3]);
+    BD_LOG("CENSUS",
+           "  state mask=%d%d%d%d depth_test=%d func=0x%x depth_mask=%d "
+           "cull=%d front=0x%x vp=[%d %d %d %d]",
+           (int)color_mask[0], (int)color_mask[1], (int)color_mask[2],
+           (int)color_mask[3], (int)depth_test, (unsigned)depth_func,
+           (int)depth_mask, (int)cull_face, (unsigned)front_face, viewport[0],
+           viewport[1], viewport[2], viewport[3]);
     if (have_color)
         BD_LOG("CENSUS", "  _Color = %.3f %.3f %.3f %.3f", color[0], color[1],
                color[2], color[3]);
+    if (glad_glGetUniformLocation && glad_glGetUniformfv) {
+        const char* names[] = {"unity_MatrixVP", "unity_ObjectToWorld", "matrix"};
+        for (const char* name : names) {
+            GLint loc = glad_glGetUniformLocation(program, name);
+            if (loc < 0)
+                continue;
+            GLfloat m[16] = {0};
+            glad_glGetUniformfv(program, loc, m);
+            BD_LOG("CENSUS", "  %s = [%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f "
+                             "| %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]",
+                   name, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8],
+                   m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+        }
+    }
+    // Local-space vertex bounds: separates "transform is wrong" from "the
+    // geometry itself is a point/NaN".
+    if (logged <= 6)
+        for (GLint i = 0; i < 4; i++)
+            bd_dump_attribute_bounds(i, count);
 }
 
 // Debug (BD_CENSUS_PROBE=1): fill the draw target with magenta, run the draw,
