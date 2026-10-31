@@ -3,6 +3,7 @@
 // (Upstream attribution preserved via git log.)
 #include "globals.h"
 #include <cstdlib>
+#include <cctype>
 #include <execinfo.h>
 #include <iostream>
 
@@ -754,6 +755,17 @@ namespace il2cpp_patch {
     typedef void* (*p_class_from_name)(void* image, const char* ns, const char* name);
     typedef void* (*p_class_get_method_from_name)(void* klass, const char* name, int argc);
     typedef void* (*p_runtime_invoke)(void* method, void* obj, void** params, void** exc);
+    // Introspection exports used by the BD_IL2CPP_DUMP inventory only.
+    typedef uint32_t    (*p_image_get_class_count)(void* image);
+    typedef void*       (*p_image_get_class)(void* image, size_t index);
+    typedef const char* (*p_class_get_name)(void* klass);
+    typedef const char* (*p_class_get_namespace)(void* klass);
+    typedef void*       (*p_class_get_declaring_type)(void* klass);
+    typedef void*       (*p_class_get_methods)(void* klass, void** iter);
+    typedef const char* (*p_method_get_name)(void* method);
+    typedef uint32_t    (*p_method_get_param_count)(void* method);
+    typedef void*       (*p_class_get_fields)(void* klass, void** iter);
+    typedef const char* (*p_field_get_name)(void* field);
 
     static p_domain_get                 il2cpp_domain_get;
     static p_domain_get_assemblies      il2cpp_domain_get_assemblies;
@@ -762,7 +774,18 @@ namespace il2cpp_patch {
     static p_class_from_name            il2cpp_class_from_name;
     static p_class_get_method_from_name il2cpp_class_get_method_from_name;
     static p_runtime_invoke             il2cpp_runtime_invoke;
+    static p_image_get_class_count      il2cpp_image_get_class_count;
+    static p_image_get_class            il2cpp_image_get_class;
+    static p_class_get_name             il2cpp_class_get_name;
+    static p_class_get_namespace        il2cpp_class_get_namespace;
+    static p_class_get_declaring_type   il2cpp_class_get_declaring_type;
+    static p_class_get_methods          il2cpp_class_get_methods;
+    static p_method_get_name            il2cpp_method_get_name;
+    static p_method_get_param_count     il2cpp_method_get_param_count;
+    static p_class_get_fields           il2cpp_class_get_fields;
+    static p_field_get_name             il2cpp_field_get_name;
     static bool                         g_probe_app_paths = false;
+    static std::string                  g_dump_filter;
 
     typedef void* (*p_il2cpp_init)(const char*);
 
@@ -938,6 +961,98 @@ namespace il2cpp_patch {
 
     void probe_app_paths_pub(const char* tag) { probe_app_paths(tag); }
 
+    // ---- Class/method inventory (BD_IL2CPP_DUMP=<substring>) -----------------
+    // Hooking by guessed names reported "class Fade/Menu/MenuButtons not found":
+    // those types are not Addressable by the names the C# source suggests (another
+    // namespace, a different assembly, or a nested type). Walk the loaded images
+    // and print the real names instead of guessing.
+    //   BD_IL2CPP_DUMP=Fade  -> every class whose "Namespace.Name" contains
+    //                           "Fade" (case-insensitive), with methods/fields.
+    //   BD_IL2CPP_DUMP='*'   -> names only, Assembly-CSharp images only (full
+    //                           inventory, small enough to pull over ssh).
+    // Diagnostics only; nothing here affects the running game.
+    static bool bd_icontains(const char* haystack, const char* needle) {
+        if (!haystack || !needle || !*needle) return false;
+        const size_t nl = strlen(needle);
+        for (const char* p = haystack; *p; ++p) {
+            size_t i = 0;
+            while (i < nl && p[i] &&
+                   tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i])) ++i;
+            if (i == nl) return true;
+        }
+        return false;
+    }
+
+    static std::string bd_class_display(void* klass, const char** ns_out) {
+        // Nested types report only their own name and inherit the outer
+        // namespace, so climb declaring_type to rebuild the "Outer/<Inner>d__4"
+        // spelling il2cpp_class_from_name expects.
+        std::vector<std::string> parts;
+        void* outer = klass;
+        while (klass && parts.size() < 8) {
+            const char* nm = il2cpp_class_get_name(klass);
+            parts.push_back(nm ? nm : "?");
+            outer = klass;
+            klass = il2cpp_class_get_declaring_type ? il2cpp_class_get_declaring_type(klass) : nullptr;
+        }
+        if (ns_out) *ns_out = (outer && il2cpp_class_get_namespace) ? il2cpp_class_get_namespace(outer) : "";
+        std::string out;
+        for (size_t i = parts.size(); i-- > 0;) {
+            if (!out.empty()) out.push_back('/');
+            out.append(parts[i]);
+        }
+        return out;
+    }
+
+    static void dump_classes() {
+        if (g_dump_filter.empty()) return;
+        if (!il2cpp_image_get_class_count || !il2cpp_image_get_class ||
+            !il2cpp_class_get_name || !il2cpp_class_get_namespace) {
+            BD_LOG("DUMP", "il2cpp introspection exports missing; dump skipped");
+            return;
+        }
+        const bool names_only = (g_dump_filter == "*");
+        void* dom = il2cpp_domain_get();
+        size_t n = 0;
+        void** as = il2cpp_domain_get_assemblies(dom, &n);
+        int matched = 0;
+        for (size_t i = 0; i < n; i++) {
+            void* img = il2cpp_assembly_get_image(as[i]);
+            if (!img) continue;
+            const char* img_name = il2cpp_image_get_name(img);
+            if (names_only && !(img_name && strstr(img_name, "Assembly-CSharp"))) continue;
+            uint32_t count = il2cpp_image_get_class_count(img);
+            for (uint32_t c = 0; c < count; c++) {
+                void* klass = il2cpp_image_get_class(img, c);
+                if (!klass) continue;
+                const char* ns = nullptr;
+                std::string name = bd_class_display(klass, &ns);
+                std::string full = std::string(ns ? ns : "") + "." + name;
+                if (!names_only && !bd_icontains(full.c_str(), g_dump_filter.c_str())) continue;
+                ++matched;
+                BD_LOG("DUMP", "CLASS %s | %s", img_name ? img_name : "?", full.c_str());
+                if (names_only) continue;
+                if (il2cpp_class_get_methods && il2cpp_method_get_name) {
+                    void* it = nullptr;
+                    while (void* m = il2cpp_class_get_methods(klass, &it)) {
+                        const char* mn = il2cpp_method_get_name(m);
+                        if (!mn) continue;
+                        BD_LOG("DUMP", "  M %s(%u)", mn,
+                               il2cpp_method_get_param_count ? il2cpp_method_get_param_count(m) : 0);
+                    }
+                }
+                if (il2cpp_class_get_fields && il2cpp_field_get_name) {
+                    void* it = nullptr;
+                    while (void* f = il2cpp_class_get_fields(klass, &it)) {
+                        const char* fn = il2cpp_field_get_name(f);
+                        if (fn) BD_LOG("DUMP", "  F %s", fn);
+                    }
+                }
+            }
+        }
+        BD_LOG("DUMP", "%d class(es) matched '%s'", matched, g_dump_filter.c_str());
+    }
+
     // ---- L2: what really produces the StreamingAssets URL host ---------------
     // libunity 0x47e940 assembles
     //     streamingAssetsPath = "jar:file://" + F() + "!/assets"
@@ -997,6 +1112,7 @@ namespace il2cpp_patch {
         bd_startup::Scope post_init("il2cpp post-init hooks");
         install_once();
         probe_app_paths("post-init");           // L2: early snapshot (may be too early)
+        dump_classes();                         // BD_IL2CPP_DUMP inventory
         for (int i = 0; i < g_post_init_n; i++) {
             if (g_post_init_cb[i].cb) g_post_init_cb[i].cb(g_post_init_cb[i].userdata);
         }
@@ -1043,8 +1159,10 @@ namespace il2cpp_patch {
         g_mod = lil2cpp;
         load_config();
         g_probe_app_paths = std::getenv("BD_PROBE_APPPATHS") != nullptr;
-        // No patches, no post-init hook and no probe -> fully inert.
-        if (g_n == 0 && g_post_init_n == 0 && !g_probe_app_paths) return;
+        const char* dump = std::getenv("BD_IL2CPP_DUMP");
+        g_dump_filter = (dump && *dump) ? dump : "";
+        // No patches, no post-init hook, no probe and no dump -> fully inert.
+        if (g_n == 0 && g_post_init_n == 0 && !g_probe_app_paths && g_dump_filter.empty()) return;
         il2cpp_domain_get                 = (p_domain_get)so_symbol(lil2cpp, "il2cpp_domain_get");
         il2cpp_domain_get_assemblies      = (p_domain_get_assemblies)so_symbol(lil2cpp, "il2cpp_domain_get_assemblies");
         il2cpp_assembly_get_image         = (p_assembly_get_image)so_symbol(lil2cpp, "il2cpp_assembly_get_image");
@@ -1053,6 +1171,18 @@ namespace il2cpp_patch {
         il2cpp_class_get_method_from_name = (p_class_get_method_from_name)so_symbol(lil2cpp, "il2cpp_class_get_method_from_name");
         // Needed by the BD_PROBE_APPPATHS probe only; not part of the hard set.
         il2cpp_runtime_invoke = (p_runtime_invoke)so_symbol(lil2cpp, "il2cpp_runtime_invoke");
+        if (!g_dump_filter.empty()) {
+            il2cpp_image_get_class_count    = (p_image_get_class_count)so_symbol(lil2cpp, "il2cpp_image_get_class_count");
+            il2cpp_image_get_class          = (p_image_get_class)so_symbol(lil2cpp, "il2cpp_image_get_class");
+            il2cpp_class_get_name           = (p_class_get_name)so_symbol(lil2cpp, "il2cpp_class_get_name");
+            il2cpp_class_get_namespace      = (p_class_get_namespace)so_symbol(lil2cpp, "il2cpp_class_get_namespace");
+            il2cpp_class_get_declaring_type = (p_class_get_declaring_type)so_symbol(lil2cpp, "il2cpp_class_get_declaring_type");
+            il2cpp_class_get_methods        = (p_class_get_methods)so_symbol(lil2cpp, "il2cpp_class_get_methods");
+            il2cpp_method_get_name          = (p_method_get_name)so_symbol(lil2cpp, "il2cpp_method_get_name");
+            il2cpp_method_get_param_count   = (p_method_get_param_count)so_symbol(lil2cpp, "il2cpp_method_get_param_count");
+            il2cpp_class_get_fields         = (p_class_get_fields)so_symbol(lil2cpp, "il2cpp_class_get_fields");
+            il2cpp_field_get_name           = (p_field_get_name)so_symbol(lil2cpp, "il2cpp_field_get_name");
+        }
         if (!il2cpp_domain_get || !il2cpp_class_from_name || !il2cpp_class_get_method_from_name) {
             BD_LOG("DMG", "missing il2cpp API exports, patches disabled");
             return;
