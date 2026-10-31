@@ -1,5 +1,6 @@
     
 #include "../globals.h"
+#include "applovin.h"
 #include "jnibridge.h"
 #include "javac.h"
 #include "baron/baron.h"
@@ -88,6 +89,10 @@ bool JNIBridgeProxy::handleMessage(std::shared_ptr<jnivm::android::os::Message> 
 }
 
 void JNIBridgeProxy::doFrame(jlong frameTimeNanos) {
+    // Ad SDK callbacks are queued by the stubs and delivered here, once the
+    // Java call that produced them has returned (the real SDK posts them from
+    // a background thread).
+    BDAppLovinFlushEvents();
     if (implementedInterfaces.count("android/view/Choreographer$FrameCallback")) {
         // Note: The native method probably doesn't take an argument. The frame time
         // is usually queried from a native system. We just call the method.

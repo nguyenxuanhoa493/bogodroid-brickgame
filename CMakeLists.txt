@@ -120,6 +120,7 @@ add_executable(${CMAKE_PROJECT_NAME}
     javastubs/android_media.cpp
     javastubs/android_misc.cpp
     javastubs/android_descriptors.cpp
+    javastubs/applovin.cpp
     javastubs/bd_video.cpp
     javastubs/javac.cpp
     platform/common/toml_include.cpp

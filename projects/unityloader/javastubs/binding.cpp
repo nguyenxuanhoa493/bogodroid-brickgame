@@ -1,4 +1,5 @@
 #include "android.h"
+#include "applovin.h"
 #include "baron/baron.h"
 #include "fakefmod.h"
 #ifdef BD_ENABLE_GPLAY
@@ -23,6 +24,7 @@ void InitJNIBinding(FakeJni::Jvm* vm)
 
     InitJNIJavaClasses(vm);
     InitJNIAndroidClasses(vm);
+    InitJNIAppLovinClasses(vm);
 #ifdef BD_ENABLE_GPLAY
     InitJNIGooglePlayClasses(vm);
 #endif
