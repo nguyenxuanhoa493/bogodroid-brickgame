@@ -1,6 +1,7 @@
 #include "unity.h"
 #include "../globals.h"
 #include "baron/baron.h"
+#include <jnivm/internal/findclass.h>
 #include "logging.h"
 #include "jnibridge.h"
 #include "toml++/toml.hpp"
@@ -1129,6 +1130,92 @@ std::shared_ptr<jnivm::java::lang::reflect::Constructor> jnivm::com::unity3d::pl
     return ctor;
 }
 
+namespace {
+
+// "(" through ")" of a JNI signature, inclusive.
+std::string bd_sig_params(const std::string& sig)
+{
+    const auto open = sig.find('(');
+    const auto close = sig.find(')');
+    if (open == std::string::npos || close == std::string::npos || close < open)
+        return {};
+    return sig.substr(open, close - open + 1);
+}
+
+std::string bd_sig_return(const std::string& sig)
+{
+    const auto close = sig.find(')');
+    if (close == std::string::npos)
+        return {};
+    return sig.substr(close + 1);
+}
+
+int bd_sig_param_count(const std::string& sig)
+{
+    const auto open = sig.find('(');
+    if (open == std::string::npos)
+        return -1;
+    int count = 0;
+    for (size_t i = open + 1; i < sig.size() && sig[i] != ')'; ++i) {
+        if (sig[i] == '[')
+            continue;
+        ++count;
+        if (sig[i] == 'L') {
+            const auto end = sig.find(';', i);
+            if (end == std::string::npos)
+                return count;
+            i = end;
+        }
+    }
+    return count;
+}
+
+// Choose which registered overload a reflected lookup meant.
+//
+// Unity's AndroidJNIHelper builds method signatures out of Class.getName():
+// parameter classes arrive dotted ("Lcom.android.billingclient.api.X;") and
+// the return is erased to java.lang.Object. The stubs are declared with their
+// concrete C++ return types, so the request never matches byte for byte.
+// Scoring the duplicates on the parts that do survive -- parameter list, then
+// parameter count, then return -- recovers the intended overload. All scores
+// equal means the request really is ambiguous, so it keeps returning null
+// rather than guessing an arity the caller's jvalue array may not satisfy.
+std::shared_ptr<jnivm::Method> bdScoreOverloads(
+    const std::vector<std::shared_ptr<jnivm::Method>>& candidates,
+    FakeJni::JString* wantedSig, bool isStatic)
+{
+    const std::string wanted =
+        wantedSig != nullptr ? jnivm::NormalizeDots(wantedSig->c_str()) : std::string();
+    const std::string wantedParams = bd_sig_params(wanted);
+    const std::string wantedReturn = bd_sig_return(wanted);
+    const int wantedCount = bd_sig_param_count(wanted);
+
+    std::shared_ptr<jnivm::Method> best;
+    int bestScore = -1;
+    bool tie = false;
+    for (const auto& candidate : candidates) {
+        int score = 0;
+        if (!wantedParams.empty() && bd_sig_params(candidate->signature) == wantedParams)
+            score += 8;
+        else if (bd_sig_param_count(candidate->signature) == wantedCount)
+            score += 2;
+        if (!wantedReturn.empty() && bd_sig_return(candidate->signature) == wantedReturn)
+            score += 4;
+        if ((bool)candidate->_static == isStatic)
+            score += 1;
+        if (score > bestScore) {
+            best = candidate;
+            bestScore = score;
+            tie = false;
+        } else if (score == bestScore) {
+            tie = true;
+        }
+    }
+    return tie ? nullptr : best;
+}
+
+} // namespace
+
 std::shared_ptr<jnivm::java::lang::reflect::Method> jnivm::com::unity3d::player::ReflectionHelper::getMethodID(std::shared_ptr<jnivm::java::lang::Class> clazz, std::shared_ptr<FakeJni::JString> methodName, std::shared_ptr<FakeJni::JString> signature, bool isStatic)
 {
     if(clazz == nullptr)
@@ -1165,22 +1252,37 @@ std::shared_ptr<jnivm::java::lang::reflect::Method> jnivm::com::unity3d::player:
         }
     }
 
-    // Method 1: Search for matching methods in class by name only (bail out if there is ambiguity due to duplicates)
+    // Method 1: Search for matching methods in class by name only. A unique
+    // name match is taken as-is; duplicates are scored against the requested
+    // signature (bdScoreOverloads) instead of bailing out.
+    //
+    // Bailing out used to be the whole story: two overloads of one name sent
+    // the lookup into the exact-signature pass, which Unity's own requests
+    // cannot satisfy -- it asks for erased returns ("Ljava/lang/Object;") and
+    // dotted parameter classes. com/android/billingclient/api/BillingClient$
+    // Builder registers both spellings of enablePendingPurchases and build for
+    // exactly that reason, so every lookup on those names failed, the managed
+    // side got a null Method, and Unity IAP's GooglePlay store constructor
+    // threw StoreException in a loop that never lets the game boot.
 
-    std::shared_ptr<Method> foundMethod=nullptr;
-    bool duplicate=false;
+    std::vector<std::shared_ptr<Method>> candidates;
     for(std::shared_ptr<Method> method : clazz.get()->methods)
     {
-        if(strcmp(method->name.c_str(), name) == 0)
-        {
-            if(foundMethod != nullptr)
-                duplicate=true;
-            
-            foundMethod=method;
-        }
+        if(method != nullptr && strcmp(method->name.c_str(), name) == 0)
+            candidates.push_back(method);
     }
 
-    if(foundMethod != nullptr && !duplicate)
+    std::shared_ptr<Method> foundMethod=nullptr;
+    if(candidates.size() == 1)
+    {
+        foundMethod=candidates.front();
+    }
+    else if(candidates.size() > 1)
+    {
+        foundMethod=bdScoreOverloads(candidates, signature.get(), isStatic);
+    }
+
+    if(foundMethod != nullptr)
     {
         auto method = std::shared_ptr<Method>(
         (Method*)clazz->getMethod(foundMethod->signature.c_str(), name),
@@ -1212,7 +1314,7 @@ std::shared_ptr<jnivm::java::lang::reflect::Method> jnivm::com::unity3d::player:
     // NullReferenceException. Reusing the *registered* signature of the unique
     // name match is the same trick Method 1 uses, so argument arity stays
     // consistent with what the stub actually reads.
-    if (foundMethod == nullptr || duplicate) {
+    if (foundMethod == nullptr) {
         std::shared_ptr<Method> inherited = nullptr;
         bool inheritedDuplicate = false;
         if (jnivm::ENV* env = jnivm::ENV::FromJNIEnv(FakeJni::JniEnv::getCurrentEnv())) {
