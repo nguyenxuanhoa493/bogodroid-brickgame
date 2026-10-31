@@ -2426,6 +2426,7 @@ struct BdDrawStat {
 
 static std::map<std::pair<GLuint, GLuint>, BdDrawStat> g_draw_stats;
 static std::set<GLuint> g_census_fbos;
+static std::set<GLuint> g_census_textures;
 static uint64_t g_draw_total = 0;
 
 static void bd_census_detail(GLuint program, GLuint fbo, GLsizei count);
@@ -2516,6 +2517,8 @@ static void bd_census_detail(GLuint program, GLuint fbo, GLsizei count)
     GLint tex_fmt = 0;
     if (glad_glGetIntegerv)
         glad_glGetIntegerv(0x8069 /*GL_TEXTURE_BINDING_2D*/, &tex);
+    if (tex > 0 && g_census_textures.size() < 16)
+        g_census_textures.insert((GLuint)tex);
     if (tex > 0 && glad_glGetTexLevelParameteriv) {
         glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0, 0x1000, &tex_w);
         glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0, 0x1001, &tex_h);
@@ -2575,6 +2578,63 @@ extern "C" void bd_draw_census_dump(int swap_index)
     glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &previous_fbo);
     for (GLuint fbo : g_census_fbos)
         bd_census_dump_fbo(fbo, prefix, swap_index);
+
+    // Sample the textures the UI draws actually read: a black draw is either a
+    // black texture (upload/decode) or a black shader/geometry.
+    GLuint scratch = 0;
+    if (!g_census_textures.empty() && glad_glGenFramebuffers &&
+        glad_glFramebufferTexture2D) {
+        glad_glGenFramebuffers(1, &scratch);
+        for (GLuint tex : g_census_textures) {
+            glad_glBindTexture(BD_GL_TEXTURE_2D, tex);
+            int width = 0;
+            int height = 0;
+            if (glad_glGetTexLevelParameteriv) {
+                glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0, 0x1000, &width);
+                glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0, 0x1001, &height);
+            }
+            if (width <= 0 || height <= 0 || width > 2048 || height > 2048) {
+                BD_LOG("CENSUS", "tex %u %dx%d (skipped)", tex, width, height);
+                continue;
+            }
+            glad_glBindFramebuffer(0x8D40, scratch);
+            glad_glFramebufferTexture2D(0x8D40, 0x8CE0, BD_GL_TEXTURE_2D, tex, 0);
+            const GLenum status = glad_glCheckFramebufferStatus
+                                      ? glad_glCheckFramebufferStatus(0x8D40)
+                                      : 0;
+            if (status != 0x8CD5 /*GL_FRAMEBUFFER_COMPLETE*/) {
+                BD_LOG("CENSUS", "tex %u %dx%d fbo_status=0x%x", tex, width,
+                       height, (unsigned)status);
+                continue;
+            }
+            std::vector<uint8_t> pixels((size_t)width * (size_t)height * 3u);
+            glad_glFinish();
+            glad_glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE,
+                              pixels.data());
+            char path[512];
+            snprintf(path, sizeof(path), "%s.tex%u.%d.ppm", prefix, tex,
+                     swap_index);
+            FILE* file = fopen(path, "wb");
+            if (!file)
+                continue;
+            fprintf(file, "P6\n%d %d\n255\n", width, height);
+            for (int y = height - 1; y >= 0; --y)
+                fwrite(pixels.data() + (size_t)y * width * 3u, 1,
+                       (size_t)width * 3u, file);
+            fclose(file);
+            uint64_t sum = 0;
+            int nonblack = 0;
+            for (size_t p = 0; p < pixels.size(); p += 3) {
+                sum += pixels[p];
+                if (pixels[p] | pixels[p + 1] | pixels[p + 2])
+                    ++nonblack;
+            }
+            BD_LOG("CENSUS", "tex %u %dx%d -> %s mean R=%llu nonblack=%d/%zu", tex,
+                   width, height, path, (unsigned long long)(sum / (pixels.size() / 3)),
+                   nonblack, pixels.size() / 3);
+        }
+        glad_glDeleteFramebuffers(1, &scratch);
+    }
     glad_glBindFramebuffer(0x8D40, (GLuint)previous_fbo);
 }
 
