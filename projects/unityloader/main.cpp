@@ -968,6 +968,7 @@ namespace il2cpp_patch {
     // and print the real names instead of guessing.
     //   BD_IL2CPP_DUMP=Fade  -> every class whose "Namespace.Name" contains
     //                           "Fade" (case-insensitive), with methods/fields.
+    //                           Comma-separated terms match any ("Menu,Ads").
     //   BD_IL2CPP_DUMP='*'   -> names only, Assembly-CSharp images only (full
     //                           inventory, small enough to pull over ssh).
     // Diagnostics only; nothing here affects the running game.
@@ -981,6 +982,20 @@ namespace il2cpp_patch {
             if (i == nl) return true;
         }
         return false;
+    }
+
+    static std::vector<std::string> bd_split_terms(const std::string& s) {
+        std::vector<std::string> out;
+        size_t start = 0;
+        for (;;) {
+            size_t comma = s.find(',', start);
+            if (comma == std::string::npos) comma = s.size();
+            std::string term = s.substr(start, comma - start);
+            if (!term.empty()) out.push_back(term);
+            if (comma == s.size()) break;
+            start = comma + 1;
+        }
+        return out;
     }
 
     static std::string bd_class_display(void* klass, const char** ns_out) {
@@ -1011,7 +1026,9 @@ namespace il2cpp_patch {
             BD_LOG("DUMP", "il2cpp introspection exports missing; dump skipped");
             return;
         }
-        const bool names_only = (g_dump_filter == "*");
+        const std::vector<std::string> terms = bd_split_terms(g_dump_filter);
+        bool names_only = false;
+        for (const auto& term : terms) if (term == "*") names_only = true;
         void* dom = il2cpp_domain_get();
         size_t n = 0;
         void** as = il2cpp_domain_get_assemblies(dom, &n);
@@ -1028,7 +1045,13 @@ namespace il2cpp_patch {
                 const char* ns = nullptr;
                 std::string name = bd_class_display(klass, &ns);
                 std::string full = std::string(ns ? ns : "") + "." + name;
-                if (!names_only && !bd_icontains(full.c_str(), g_dump_filter.c_str())) continue;
+                if (!names_only) {
+                    bool hit = false;
+                    for (const auto& term : terms) {
+                        if (bd_icontains(full.c_str(), term.c_str())) { hit = true; break; }
+                    }
+                    if (!hit) continue;
+                }
                 ++matched;
                 BD_LOG("DUMP", "CLASS %s | %s", img_name ? img_name : "?", full.c_str());
                 if (names_only) continue;
