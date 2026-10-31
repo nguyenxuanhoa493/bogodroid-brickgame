@@ -179,7 +179,80 @@ namespace com {
             }
         }
     }
-}
+
+    // Google Play Billing.
+    //
+    // Unity IAP builds its store through these classes in its constructor
+    // (newBuilder -> setListener -> enablePendingPurchases -> build). Without
+    // them the erased-return lookup yields null and the managed GooglePlay
+    // store constructor dies with a NullReferenceException, which Unity
+    // retries in a tight loop and never lets the game boot. None of this can
+    // work offline, so the stubs return inert objects: build() succeeds,
+    // startConnection() never calls back, and every purchase call is a no-op.
+    // C++ namespace deliberately does not mirror the Java package: a
+    // jnivm::com::android node would shadow jnivm::android for every
+    // qualified android::... lookup made inside jnivm::com::* headers.
+    namespace billingclient {
+        namespace api {
+                    class BillingClient;
+                    class PendingPurchasesParams;
+
+                    class BillingClientBuilder : public FakeJni::JObject {
+                    public:
+                        DEFINE_CLASS_NAME("com/android/billingclient/api/BillingClient$Builder")
+                        std::shared_ptr<BillingClientBuilder> setListener(std::shared_ptr<FakeJni::JObject> listener);
+                        std::shared_ptr<BillingClientBuilder> enablePendingPurchases(std::shared_ptr<PendingPurchasesParams> params);
+                        std::shared_ptr<BillingClient> build();
+                    };
+
+                    class BillingResult : public FakeJni::JObject {
+                    public:
+                        DEFINE_CLASS_NAME("com/android/billingclient/api/BillingResult")
+                        jint getResponseCode();
+                        jint getOnPurchasesUpdatedSubResponseCode();
+                        std::shared_ptr<FakeJni::JString> getDebugMessage();
+
+                        jint responseCode = 3; // BILLING_UNAVAILABLE
+                        jint subResponseCode = 0;
+                        std::shared_ptr<FakeJni::JString> debugMessage;
+                    };
+
+                    class BillingClient : public FakeJni::JObject {
+                    public:
+                        DEFINE_CLASS_NAME("com/android/billingclient/api/BillingClient")
+                        static std::shared_ptr<BillingClientBuilder> newBuilder(
+                            std::shared_ptr<jnivm::android::content::Context> context);
+                        void startConnection(std::shared_ptr<FakeJni::JObject> listener);
+                        bool isReady();
+                        void endConnection();
+                        void queryPurchasesAsync(std::shared_ptr<FakeJni::JObject> params,
+                                                 std::shared_ptr<FakeJni::JObject> listener);
+                        void queryProductDetailsAsync(std::shared_ptr<FakeJni::JObject> params,
+                                                      std::shared_ptr<FakeJni::JObject> listener);
+                        void acknowledgePurchase(std::shared_ptr<FakeJni::JObject> params,
+                                                 std::shared_ptr<FakeJni::JObject> listener);
+                        void consumeAsync(std::shared_ptr<FakeJni::JObject> params,
+                                          std::shared_ptr<FakeJni::JObject> listener);
+                        std::shared_ptr<BillingResult> launchBillingFlow(
+                            std::shared_ptr<jnivm::android::app::Activity> activity,
+                            std::shared_ptr<FakeJni::JObject> params);
+                    };
+
+                    class PendingPurchasesParamsBuilder : public FakeJni::JObject {
+                    public:
+                        DEFINE_CLASS_NAME("com/android/billingclient/api/PendingPurchasesParams$Builder")
+                        std::shared_ptr<PendingPurchasesParamsBuilder> enableOneTimeProducts();
+                        std::shared_ptr<PendingPurchasesParams> build();
+                    };
+
+                    class PendingPurchasesParams : public FakeJni::JObject {
+                    public:
+                        DEFINE_CLASS_NAME("com/android/billingclient/api/PendingPurchasesParams")
+                        static std::shared_ptr<PendingPurchasesParamsBuilder> newBuilder();
+                    };
+                }
+            }
+    }
 }
 
 #endif

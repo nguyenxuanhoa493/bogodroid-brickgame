@@ -5,6 +5,7 @@
 extern toml::table config;
 
 using namespace jnivm::com::google::android::vending::licensing;
+using namespace jnivm::com::billingclient::api;
 
 AESObfuscator::AESObfuscator(std::shared_ptr<FakeJni::JByteArray>,
                              std::shared_ptr<FakeJni::JString>,
@@ -158,6 +159,137 @@ std::shared_ptr<jnivm::com::google::android::play::core::tasks::Task> jnivm::com
     return std::make_shared<jnivm::com::google::android::play::core::tasks::Task>(std::make_shared<jnivm::com::google::android::gms::games::AuthenticationResult>());
 }
 
+// Google Play Billing: inert objects only. See the comment in gplay.h.
+std::shared_ptr<BillingClientBuilder> BillingClient::newBuilder(std::shared_ptr<jnivm::android::content::Context> context)
+{
+    BD_LOG("GPLAY", "billing newBuilder(%p) -> inert builder", context.get());
+    return std::make_shared<BillingClientBuilder>();
+}
+
+std::shared_ptr<BillingClientBuilder> BillingClientBuilder::setListener(std::shared_ptr<FakeJni::JObject> listener)
+{
+    BD_LOG("GPLAY", "billing setListener(%p)", listener.get());
+    return std::static_pointer_cast<BillingClientBuilder>(shared_from_this());
+}
+
+std::shared_ptr<BillingClientBuilder> BillingClientBuilder::enablePendingPurchases(std::shared_ptr<PendingPurchasesParams> params)
+{
+    BD_LOG("GPLAY", "billing enablePendingPurchases(%p)", params.get());
+    return std::static_pointer_cast<BillingClientBuilder>(shared_from_this());
+}
+
+std::shared_ptr<BillingClient> BillingClientBuilder::build()
+{
+    BD_LOG("GPLAY", "billing build() -> inert BillingClient");
+    return std::make_shared<BillingClient>();
+}
+
+void BillingClient::startConnection(std::shared_ptr<FakeJni::JObject> listener)
+{
+    // Offline: deliberately no callback, so Unity IAP stays "connecting"
+    // instead of failing its store setup inside the managed layer.
+    BD_LOG("GPLAY", "billing startConnection(%p): offline, no callback", listener.get());
+}
+
+bool BillingClient::isReady()
+{
+    return false;
+}
+
+void BillingClient::endConnection() {}
+
+void BillingClient::queryPurchasesAsync(std::shared_ptr<FakeJni::JObject>, std::shared_ptr<FakeJni::JObject>)
+{
+    BD_LOG("GPLAY", "billing queryPurchasesAsync ignored");
+}
+
+void BillingClient::queryProductDetailsAsync(std::shared_ptr<FakeJni::JObject>, std::shared_ptr<FakeJni::JObject>)
+{
+    BD_LOG("GPLAY", "billing queryProductDetailsAsync ignored");
+}
+
+void BillingClient::acknowledgePurchase(std::shared_ptr<FakeJni::JObject>, std::shared_ptr<FakeJni::JObject>)
+{
+    BD_LOG("GPLAY", "billing acknowledgePurchase ignored");
+}
+
+void BillingClient::consumeAsync(std::shared_ptr<FakeJni::JObject>, std::shared_ptr<FakeJni::JObject>)
+{
+    BD_LOG("GPLAY", "billing consumeAsync ignored");
+}
+
+std::shared_ptr<BillingResult> BillingClient::launchBillingFlow(
+    std::shared_ptr<jnivm::android::app::Activity>, std::shared_ptr<FakeJni::JObject>)
+{
+    BD_LOG("GPLAY", "billing launchBillingFlow ignored");
+    return std::make_shared<BillingResult>();
+}
+
+jint BillingResult::getResponseCode()
+{
+    return responseCode;
+}
+
+jint BillingResult::getOnPurchasesUpdatedSubResponseCode()
+{
+    return subResponseCode;
+}
+
+std::shared_ptr<FakeJni::JString> BillingResult::getDebugMessage()
+{
+    return debugMessage;
+}
+
+std::shared_ptr<PendingPurchasesParamsBuilder> PendingPurchasesParams::newBuilder()
+{
+    return std::make_shared<PendingPurchasesParamsBuilder>();
+}
+
+std::shared_ptr<PendingPurchasesParamsBuilder> PendingPurchasesParamsBuilder::enableOneTimeProducts()
+{
+    return std::static_pointer_cast<PendingPurchasesParamsBuilder>(shared_from_this());
+}
+
+std::shared_ptr<PendingPurchasesParams> PendingPurchasesParamsBuilder::build()
+{
+    return std::make_shared<PendingPurchasesParams>();
+}
+
+BEGIN_NATIVE_DESCRIPTOR(BillingClient) {
+    FakeJni::Constructor<BillingClient> {},
+},
+    { FakeJni::Function<&BillingClient::newBuilder> {}, "newBuilder", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<&BillingClient::startConnection> {}, "startConnection", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingClient::isReady> {}, "isReady", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingClient::endConnection> {}, "endConnection", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingClient::queryPurchasesAsync> {}, "queryPurchasesAsync", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingClient::queryProductDetailsAsync> {}, "queryProductDetailsAsync", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingClient::acknowledgePurchase> {}, "acknowledgePurchase", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingClient::consumeAsync> {}, "consumeAsync", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingClient::launchBillingFlow> {}, "launchBillingFlow", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(BillingClientBuilder) { FakeJni::Constructor<BillingClientBuilder> {} },
+    { FakeJni::Function<&BillingClientBuilder::setListener> {}, "setListener", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingClientBuilder::enablePendingPurchases> {}, "enablePendingPurchases", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingClientBuilder::build> {}, "build", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(BillingResult) { FakeJni::Constructor<BillingResult> {} },
+    { FakeJni::Function<&BillingResult::getResponseCode> {}, "getResponseCode", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingResult::getOnPurchasesUpdatedSubResponseCode> {}, "getOnPurchasesUpdatedSubResponseCode", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingResult::getDebugMessage> {}, "getDebugMessage", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(PendingPurchasesParams) { FakeJni::Constructor<PendingPurchasesParams> {} },
+    { FakeJni::Function<&PendingPurchasesParams::newBuilder> {}, "newBuilder", FakeJni::JMethodID::STATIC },
+    END_NATIVE_DESCRIPTOR
+
+    BEGIN_NATIVE_DESCRIPTOR(PendingPurchasesParamsBuilder) { FakeJni::Constructor<PendingPurchasesParamsBuilder> {} },
+    { FakeJni::Function<&PendingPurchasesParamsBuilder::enableOneTimeProducts> {}, "enableOneTimeProducts", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&PendingPurchasesParamsBuilder::build> {}, "build", FakeJni::JMethodID::PUBLIC },
+    END_NATIVE_DESCRIPTOR
+
 BEGIN_NATIVE_DESCRIPTOR(jnivm::com::google::android::play::core::review::ReviewManager) { FakeJni::Constructor<ReviewManager> {} },
     END_NATIVE_DESCRIPTOR
 
@@ -251,4 +383,10 @@ void InitJNIGooglePlayClasses(FakeJni::Jvm* vm)
     vm->registerClass<jnivm::com::google::android::gms::games::SnapshotsClient>();
     vm->registerClass<jnivm::com::google::android::gms::games::PlayGames>();
     vm->registerClass<jnivm::com::google::android::gms::games::PlayGamesSdk>();
+
+    vm->registerClass<BillingClient>();
+    vm->registerClass<BillingClientBuilder>();
+    vm->registerClass<BillingResult>();
+    vm->registerClass<PendingPurchasesParams>();
+    vm->registerClass<PendingPurchasesParamsBuilder>();
 }
