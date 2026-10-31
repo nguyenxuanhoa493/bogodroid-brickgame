@@ -797,6 +797,8 @@ namespace il2cpp_patch {
     //                  clobbered by this int-only thunk, but we overwrite the
     //                  result field anyway, so the final value is always exact.
     struct Patch {
+        std::string assembly; // image substring; empty = Assembly-CSharp
+        std::string ns;       // class namespace; empty = ""
         std::string cls, method;
         int   argc  = 0;   // param count (excludes hidden this/MethodInfo*)
         int   arg   = 0;   // which param holds the obj pointer (0-based); -1 = `this`
@@ -806,6 +808,8 @@ namespace il2cpp_patch {
         int   src_field = -1;   // freeze: copy from this offset; <0 => use setval
         int   type  = 0;   // 0=f32, 1=i32 (field/src width)
         float setval = 0;  // freeze constant when src_field<0
+        int   log_arg = 0; // mode 3: raw register index (x0=0) to print
+        bool  arg_string = false; // mode 3: log_arg holds an Il2CppString*
         int   logged = 0;  // mode 3: calls logged so far (capped)
         uintptr_t orig = 0;
     };
@@ -839,6 +843,8 @@ namespace il2cpp_patch {
     typedef uintptr_t (*orig8_t)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,
                                  uintptr_t,uintptr_t,uintptr_t,uintptr_t);
 
+    static std::string il2cpp_to_utf8(void* s);
+
     // One hook per slot, statically bound to g_p[K]. Hot path is a couple of
     // loads/stores around a single original call — only fires when the game
     // itself invokes the hooked method (a damage event or a value setter), never
@@ -861,8 +867,14 @@ namespace il2cpp_patch {
         if (p->mode == 3) { \
             if (p->logged < 64) { \
                 ++p->logged; \
-                BD_LOG("HOOK", "%s.%s x0=%p x1=%p x2=%p x3=%p", p->cls.c_str(), \
-                       p->method.c_str(), (void*)x0, (void*)x1, (void*)x2, (void*)x3); \
+                if (p->arg_string) { \
+                    BD_LOG("HOOK", "%s.%s x%d=%p str='%s'", p->cls.c_str(), p->method.c_str(), \
+                           p->log_arg, (void*)*a[p->log_arg], \
+                           il2cpp_to_utf8((void*)*a[p->log_arg]).c_str()); \
+                } else { \
+                    BD_LOG("HOOK", "%s.%s x0=%p x1=%p x2=%p x3=%p", p->cls.c_str(), \
+                           p->method.c_str(), (void*)x0, (void*)x1, (void*)x2, (void*)x3); \
+                } \
             } \
             return ((orig8_t)p->orig)(x0,x1,x2,x3,x4,x5,x6,x7); \
         } \
@@ -925,6 +937,9 @@ namespace il2cpp_patch {
     };
     static std::string il2cpp_to_utf8(void* s) {
         if (!s) return std::string("<null>");
+        // Scene-load tracing passes whatever is in the register: the int
+        // overload of LoadScene puts a small build index there, not a pointer.
+        if ((uintptr_t)s < 0x10000) return std::string("<small-int>");
         const Il2CppStringLayout* str = (const Il2CppStringLayout*)s;
         int32_t n = str->length;
         if (n < 0 || n > 8192) return std::string("<bad-length>");
@@ -1098,11 +1113,13 @@ namespace il2cpp_patch {
     static void install_once() {
         if (g_installed) return;
         g_installed = true;
-        void* img = find_image("Assembly-CSharp");
-        if (!img) { BD_LOG("DMG", "Assembly-CSharp image not found"); return; }
         for (int i = 0; i < g_n; i++) {
             Patch* p = &g_p[i];
-            void* klass = il2cpp_class_from_name(img, "", p->cls.c_str());
+            // Engine types (SceneManager, Application, ...) live in their own
+            // module image; game types default to Assembly-CSharp.
+            void* img = find_image(p->assembly.empty() ? "Assembly-CSharp" : p->assembly.c_str());
+            if (!img) { BD_LOG("DMG", "image %s not found", p->assembly.empty() ? "Assembly-CSharp" : p->assembly.c_str()); continue; }
+            void* klass = il2cpp_class_from_name(img, p->ns.c_str(), p->cls.c_str());
             if (!klass) { BD_LOG("DMG", "class %s not found", p->cls.c_str()); continue; }
             void* m = il2cpp_class_get_method_from_name(klass, p->method.c_str(), p->argc);
             if (!m) { BD_LOG("DMG", "method %s.%s(%d) not found", p->cls.c_str(), p->method.c_str(), p->argc); continue; }
@@ -1146,6 +1163,11 @@ namespace il2cpp_patch {
     //   scale (default): class/method/argc/arg/field/mult. mult==1.0 => no-op, skipped.
     //   freeze:          mode="freeze", field + (src_field | setval), type="f32"|"i32".
     //                    arg=-1 targets `this`. enabled=false => skipped.
+    //   log:             mode="log", first 64 calls print the argument registers.
+    //                    log_arg=N (x0=0) + arg_string=true prints that register
+    //                    as an Il2CppString (e.g. SceneManager.LoadScene(name)).
+    //   assembly/namespace select a non-game image/namespace (default
+    //   Assembly-CSharp + ""), e.g. assembly="UnityEngine.CoreModule".
     static void load_config() {
         auto arr = config["il2cpp_patch"].as_array();
         if (!arr) return;
@@ -1153,6 +1175,8 @@ namespace il2cpp_patch {
             auto t = node.as_table();
             if (!t) continue;
             Patch p;
+            p.assembly = (*t)["assembly"].value<std::string>().value_or("");
+            p.ns     = (*t)["namespace"].value<std::string>().value_or("");
             p.cls    = (*t)["class"].value<std::string>().value_or("");
             p.method = (*t)["method"].value<std::string>().value_or("");
             p.argc   = (int)(*t)["argc"].value<int64_t>().value_or(0);
@@ -1166,6 +1190,9 @@ namespace il2cpp_patch {
             p.src_field = (int)(*t)["src_field"].value<int64_t>().value_or(-1);
             p.setval    = (float)(*t)["setval"].value<double>().value_or(0.0);
             p.type      = ((*t)["type"].value<std::string>().value_or("f32") == "i32") ? 1 : 0;
+            p.log_arg   = (int)(*t)["log_arg"].value<int64_t>().value_or(0);
+            if (p.log_arg < 0 || p.log_arg > 7) p.log_arg = 0;
+            p.arg_string = (*t)["arg_string"].value<bool>().value_or(false);
             bool enabled = (*t)["enabled"].value<bool>().value_or(true);
             if (p.cls.empty() || p.method.empty()) continue;
             if (p.mode == 0 || p.mode == 1) {
