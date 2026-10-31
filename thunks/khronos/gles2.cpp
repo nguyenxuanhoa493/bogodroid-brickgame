@@ -2406,6 +2406,69 @@ extern "C" void bd_dump_video_rt(int swap_index)
     glad_glBindFramebuffer(0x8D40, (GLuint)previous_fbo);
 }
 
+// Debug (BD_DRAW_CENSUS=1): count draws per (program, framebuffer) and print
+// the table about once a second. A black screen then says whether anything was
+// drawn into the window surface (fbo 0) at all, instead of leaving it a guess.
+static bool bd_draw_census_enabled()
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* value = getenv("BD_DRAW_CENSUS");
+        enabled = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
+    }
+    return enabled == 1;
+}
+
+struct BdDrawStat {
+    uint64_t draws = 0;
+    uint64_t verts = 0;
+};
+
+static std::map<std::pair<GLuint, GLuint>, BdDrawStat> g_draw_stats;
+static uint64_t g_draw_total = 0;
+
+static void bd_census_draw(GLsizei count, GLsizei instances)
+{
+    if (!bd_draw_census_enabled())
+        return;
+    GLint program = 0;
+    GLint fbo = 0;
+    if (glad_glGetIntegerv) {
+        glad_glGetIntegerv(0x8B8D /*GL_CURRENT_PROGRAM*/, &program);
+        glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &fbo);
+    }
+    BdDrawStat& stat = g_draw_stats[{(GLuint)program, (GLuint)fbo}];
+    stat.draws += 1;
+    stat.verts += (uint64_t)count * (uint64_t)(instances > 0 ? instances : 1);
+    ++g_draw_total;
+}
+
+extern "C" void bd_draw_census_swap(int swap_index)
+{
+    if (!bd_draw_census_enabled())
+        return;
+    static int last_swap = 0;
+    if (swap_index - last_swap < 60)
+        return;
+    last_swap = swap_index;
+    GLint fbo = 0;
+    GLint viewport[4] = {0, 0, 0, 0};
+    if (glad_glGetIntegerv) {
+        glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &fbo);
+        glad_glGetIntegerv(0x0BA2 /*GL_VIEWPORT*/, viewport);
+    }
+    BD_LOG("CENSUS", "swap=%d total_draws=%llu now fbo=%d viewport=%dx%d+%d+%d",
+           swap_index, (unsigned long long)g_draw_total, (int)fbo, (int)viewport[2],
+           (int)viewport[3], (int)viewport[0], (int)viewport[1]);
+    for (const auto& entry : g_draw_stats) {
+        BD_LOG("CENSUS", "  program=%u fbo=%u draws=%llu verts=%llu",
+               (unsigned)entry.first.first, (unsigned)entry.first.second,
+               (unsigned long long)entry.second.draws,
+               (unsigned long long)entry.second.verts);
+    }
+    g_draw_stats.clear();
+}
+
 template <typename DrawFn>
 static void video_draw_guard(DrawFn&& draw)
 {
@@ -2427,6 +2490,7 @@ static void video_draw_guard(DrawFn&& draw)
 
 extern "C" void bd_glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
+    bd_census_draw(count, 0);
     if (g_video_program_active)
         bd_dump_video_draw("drawArrays", mode, count, 0, nullptr, first, 0);
     else {
@@ -2442,6 +2506,7 @@ extern "C" void bd_glDrawArrays(GLenum mode, GLint first, GLsizei count)
 extern "C" void bd_glDrawElements(GLenum mode, GLsizei count, GLenum type,
                                    const void* indices)
 {
+    bd_census_draw(count, 0);
     if (g_video_program_active)
         bd_dump_video_draw("drawElements", mode, count, type, indices, 0, 0);
     else {
@@ -2457,6 +2522,7 @@ extern "C" void bd_glDrawElements(GLenum mode, GLsizei count, GLenum type,
 extern "C" void bd_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count,
                                          GLsizei instances)
 {
+    bd_census_draw(count, instances);
     if (g_video_program_active)
         bd_dump_video_draw("drawArraysInstanced", mode, count, 0, nullptr, first,
                            instances);
@@ -2471,6 +2537,7 @@ extern "C" void bd_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count
 extern "C" void bd_glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
                                            const void* indices, GLsizei instances)
 {
+    bd_census_draw(count, instances);
     if (g_video_program_active)
         bd_dump_video_draw("drawElementsInstanced", mode, count, type, indices, 0,
                            instances);
