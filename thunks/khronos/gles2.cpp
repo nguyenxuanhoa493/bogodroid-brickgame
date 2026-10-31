@@ -2444,6 +2444,7 @@ static void bd_census_draw(GLsizei count, GLsizei instances)
     ++g_draw_total;
     if (fbo != 0 && g_census_fbos.size() < 16)
         g_census_fbos.insert((GLuint)fbo);
+    bd_census_detail((GLuint)program, (GLuint)fbo, count);
 }
 
 // Read back one render target so "the scene is black" can be split into "the
@@ -2495,6 +2496,62 @@ static void bd_census_dump_fbo(GLuint fbo, const char* prefix, int swap_index)
     BD_LOG("CENSUS", "rt fbo=%u attachment=%d %dx%d -> %s mean R=%llu", fbo,
            attachment, width, height, path,
            (unsigned long long)(sum / (pixels.size() / 3)));
+}
+
+// Read-only snapshot of the state a draw will actually sample: the texture on
+// the active unit, the UI colour, blending and scissor. Tells "the UI drew
+// nothing because its texture/alpha is empty" apart from "the UI drew off the
+// target" without instrumenting inside Unity.
+static void bd_census_detail(GLuint program, GLuint fbo, GLsizei count)
+{
+    static int logged = 0;
+    if (logged > 30)
+        return;
+    ++logged;
+    GLint tex = 0;
+    GLint tex_w = 0;
+    GLint tex_h = 0;
+    GLint tex_fmt = 0;
+    if (glad_glGetIntegerv)
+        glad_glGetIntegerv(0x8069 /*GL_TEXTURE_BINDING_2D*/, &tex);
+    if (tex > 0 && glad_glGetTexLevelParameteriv) {
+        glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0, 0x1000, &tex_w);
+        glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0, 0x1001, &tex_h);
+        glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0, 0x1003, &tex_fmt);
+    }
+    GLfloat color[4] = {0, 0, 0, 0};
+    bool have_color = false;
+    if (glad_glGetUniformLocation && glad_glGetUniformfv) {
+        GLint loc = glad_glGetUniformLocation(program, "_Color");
+        if (loc >= 0) {
+            glad_glGetUniformfv(program, loc, color);
+            have_color = true;
+        }
+    }
+    GLint blend = 0;
+    GLint scissor = 0;
+    GLint scissor_box[4] = {0, 0, 0, 0};
+    GLint src_rgb = 0;
+    GLint dst_rgb = 0;
+    if (glad_glIsEnabled)
+        blend = glad_glIsEnabled(0x0BE2 /*GL_BLEND*/);
+    if (glad_glGetIntegerv) {
+        glad_glGetIntegerv(0x0C11 /*GL_SCISSOR_TEST*/, &scissor);
+        glad_glGetIntegerv(0x0C10 /*GL_SCISSOR_BOX*/, scissor_box);
+        glad_glGetIntegerv(0x80C9 /*GL_BLEND_SRC_RGB*/, &src_rgb);
+        glad_glGetIntegerv(0x80C8 /*GL_BLEND_DST_RGB*/, &dst_rgb);
+    }
+    BD_LOG("CENSUS",
+           "detail program=%u fbo=%u count=%d tex=%d %dx%d fmt=0x%x color=%s "
+           "blend=%d(0x%x/0x%x) scissor=%d[%d %d %d %d]",
+           (unsigned)program, (unsigned)fbo, (int)count, (int)tex, (int)tex_w,
+           (int)tex_h, (unsigned)tex_fmt,
+           have_color ? "set" : "absent", (int)blend, (unsigned)src_rgb,
+           (unsigned)dst_rgb, (int)scissor, (int)scissor_box[0],
+           (int)scissor_box[1], (int)scissor_box[2], (int)scissor_box[3]);
+    if (have_color)
+        BD_LOG("CENSUS", "  _Color = %.3f %.3f %.3f %.3f", color[0], color[1],
+               color[2], color[3]);
 }
 
 extern "C" void bd_draw_census_dump(int swap_index)
