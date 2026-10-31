@@ -3025,6 +3025,85 @@ extern "C" void bd_glGenerateMipmap(GLenum target)
         glad_glGenerateMipmap(target);
 }
 
+// Debug (BD_TEX_TRACE=1): report what the app actually uploads for compressed
+// textures. A texture that samples black either never received bytes or was
+// rejected by the driver; both show up here while a readback cannot (ETC2 is
+// not colour-renderable, so the census dump can never show its contents).
+static void bd_trace_compressed(const char* what, GLenum target, GLint level,
+                                GLenum format, GLsizei width, GLsizei height,
+                                GLsizei image_size, const void* data)
+{
+    static int enabled = -1;
+    static int logged = 0;
+    if (enabled < 0) {
+        const char* value = getenv("BD_TEX_TRACE");
+        enabled = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
+    }
+    if (!enabled || logged >= 64)
+        return;
+    ++logged;
+    GLint tex = 0;
+    if (glad_glGetIntegerv)
+        glad_glGetIntegerv(0x8069 /*GL_TEXTURE_BINDING_2D*/, &tex);
+    size_t nonzero = 0;
+    uint64_t hash = 1469598103934665603ull;
+    unsigned lo = 255, hi = 0;
+    if (data && image_size > 0) {
+        const uint8_t* bytes = (const uint8_t*)data;
+        for (GLsizei i = 0; i < image_size; i++) {
+            if (bytes[i]) ++nonzero;
+            if (bytes[i] < lo) lo = bytes[i];
+            if (bytes[i] > hi) hi = bytes[i];
+            hash = (hash ^ bytes[i]) * 1099511628211ull;
+        }
+    }
+    const GLenum error = glad_glGetError ? glad_glGetError() : 0;
+    BD_LOG("TEX",
+           "%s tex=%d level=%d target=0x%x fmt=0x%x %dx%d size=%d ptr=%s "
+           "nonzero=%zu range=%u..%u hash=%016llx err=0x%x",
+           what, (int)tex, (int)level, (unsigned)target, (unsigned)format,
+           (int)width, (int)height, (int)image_size, data ? "set" : "null",
+           nonzero, lo, hi, (unsigned long long)hash, (unsigned)error);
+    // Keep the bytes so the block data can be decoded off-device.
+    const char* dir = getenv("BD_TEX_DUMP");
+    if (dir && *dir && data && image_size > 0 && image_size <= 65536 &&
+        level == 0) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/tex%d_%dx%d_fmt%x.etc2", dir, (int)tex,
+                 (int)width, (int)height, (unsigned)format);
+        FILE* file = fopen(path, "wb");
+        if (file) {
+            fwrite(data, 1, (size_t)image_size, file);
+            fclose(file);
+        }
+    }
+}
+
+extern "C" void bd_glCompressedTexImage2D(GLenum target, GLint level,
+                                          GLenum internalformat, GLsizei width,
+                                          GLsizei height, GLint border,
+                                          GLsizei image_size, const void* data)
+{
+    if (glad_glCompressedTexImage2D)
+        glad_glCompressedTexImage2D(target, level, internalformat, width, height,
+                                    border, image_size, data);
+    bd_trace_compressed("CompressedTexImage2D", target, level, internalformat,
+                        width, height, image_size, data);
+}
+
+extern "C" void bd_glCompressedTexSubImage2D(GLenum target, GLint level,
+                                             GLint xoffset, GLint yoffset,
+                                             GLsizei width, GLsizei height,
+                                             GLenum format, GLsizei image_size,
+                                             const void* data)
+{
+    if (glad_glCompressedTexSubImage2D)
+        glad_glCompressedTexSubImage2D(target, level, xoffset, yoffset, width,
+                                       height, format, image_size, data);
+    bd_trace_compressed("CompressedTexSubImage2D", target, level, format, width,
+                        height, image_size, data);
+}
+
 extern "C" void bd_glDeleteTextures(GLsizei n, const GLuint* textures)
 {
     if (textures) {
@@ -4320,6 +4399,10 @@ void load_gles2_funcs()
 	bd_symtable_override("glTexParameteri", (uintptr_t)&bd_glTexParameteri);
 	bd_symtable_override("glTexParameterf", (uintptr_t)&bd_glTexParameterf);
 	bd_symtable_override("glTexImage2D", (uintptr_t)&bd_glTexImage2D);
+	bd_symtable_override("glCompressedTexImage2D",
+	                     (uintptr_t)&bd_glCompressedTexImage2D);
+	bd_symtable_override("glCompressedTexSubImage2D",
+	                     (uintptr_t)&bd_glCompressedTexSubImage2D);
 	bd_symtable_override("glGenerateMipmap", (uintptr_t)&bd_glGenerateMipmap);
 	bd_symtable_override("glGetTexLevelParameteriv",
 	                     (uintptr_t)&bd_glGetTexLevelParameteriv);
