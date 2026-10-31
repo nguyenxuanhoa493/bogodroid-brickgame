@@ -2559,6 +2559,94 @@ static void bd_census_detail(GLuint program, GLuint fbo, GLsizei count)
                color[2], color[3]);
 }
 
+// Debug (BD_CENSUS_PROBE=1): fill the draw target with magenta, run the draw,
+// then measure how many pixels stopped being magenta and what colour they are.
+// Comparing before/after instead would conflate "the quad covers nothing" with
+// "the quad paints black over black", which is exactly the case under test.
+struct BdProbe {
+    GLint fbo = 0;
+    GLint program = 0;
+    int width = 0;
+    int height = 0;
+    int done = 0;
+    bool scissor = false;
+    GLfloat clear[4] = {0, 0, 0, 1};
+};
+
+static BdProbe g_probe;
+
+static bool bd_probe_begin(GLsizei count)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* value = getenv("BD_CENSUS_PROBE");
+        enabled = (value && *value && strcmp(value, "0") != 0) ? 1 : 0;
+    }
+    // Only the small UI draws are interesting; the startup batched geometry
+    // (thousands of indices) would burn the whole probe budget.
+    if (!enabled || g_probe.done >= 4 || count <= 0 || count > 1024 ||
+        !glad_glReadPixels || !glad_glGetIntegerv || !glad_glClear ||
+        !glad_glClearColor)
+        return false;
+    GLint viewport[4] = {0, 0, 0, 0};
+    glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &g_probe.fbo);
+    glad_glGetIntegerv(0x8B8D /*GL_CURRENT_PROGRAM*/, &g_probe.program);
+    glad_glGetIntegerv(0x0BA2 /*GL_VIEWPORT*/, viewport);
+    if (viewport[2] <= 0 || viewport[3] <= 0 || viewport[2] > 2048 ||
+        viewport[3] > 2048)
+        return false;
+    g_probe.width = viewport[2];
+    g_probe.height = viewport[3];
+    g_probe.scissor = false;
+    GLboolean scissor = 0;
+    glad_glGetBooleanv(0x0C11 /*GL_SCISSOR_TEST*/, &scissor);
+    g_probe.scissor = scissor != 0;
+    glad_glGetFloatv(0x0C22 /*GL_COLOR_CLEAR_VALUE*/, g_probe.clear);
+    // Sentinel fill: any pixel the draw touches must differ from this.
+    glad_glDisable(0x0C11 /*GL_SCISSOR_TEST*/);
+    glad_glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+    glad_glClear(GL_COLOR_BUFFER_BIT);
+    // Leave clear colour/state restored by the caller's end().
+    return true;
+}
+
+static void bd_probe_end(const char* what, GLsizei count)
+{
+    ++g_probe.done;
+    std::vector<uint8_t> pixels((size_t)g_probe.width * g_probe.height * 4u, 0);
+    glad_glFinish();
+    glad_glReadPixels(0, 0, g_probe.width, g_probe.height, GL_RGBA,
+                      GL_UNSIGNED_BYTE, pixels.data());
+    const GLenum read_error = glad_glGetError ? glad_glGetError() : 0;
+    size_t covered = 0;
+    size_t nonblack = 0;
+    uint64_t sr = 0, sg = 0, sb = 0;
+    for (size_t p = 0; p < pixels.size(); p += 4) {
+        // Magenta fill with a fully opaque colour mask reads back at exactly
+        // 255/0/255; require all three to call a pixel untouched.
+        if (pixels[p] == 255 && pixels[p + 1] == 0 && pixels[p + 2] == 255)
+            continue;
+        ++covered;
+        sr += pixels[p];
+        sg += pixels[p + 1];
+        sb += pixels[p + 2];
+        if (pixels[p] | pixels[p + 1] | pixels[p + 2])
+            ++nonblack;
+    }
+    BD_LOG("CENSUS",
+           "probe %s fbo=%d program=%d %dx%d count=%d covered=%zu/%zu "
+           "nonblack=%zu meanRGB=%llu,%llu,%llu err=0x%x",
+           what, (int)g_probe.fbo, (int)g_probe.program, g_probe.width,
+           g_probe.height, (int)count, covered, pixels.size() / 4, nonblack,
+           (unsigned long long)(covered ? sr / covered : 0),
+           (unsigned long long)(covered ? sg / covered : 0),
+           (unsigned long long)(covered ? sb / covered : 0), (unsigned)read_error);
+    glad_glClearColor(g_probe.clear[0], g_probe.clear[1], g_probe.clear[2],
+                      g_probe.clear[3]);
+    if (g_probe.scissor)
+        glad_glEnable(0x0C11 /*GL_SCISSOR_TEST*/);
+}
+
 extern "C" void bd_draw_census_dump(int swap_index)
 {
     if (!bd_draw_census_enabled() || g_census_fbos.empty() ||
@@ -2685,6 +2773,7 @@ static void video_draw_guard(DrawFn&& draw)
 
 extern "C" void bd_glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
+    const bool probe = bd_probe_begin(count);
     bd_census_draw(count, 0);
     if (g_video_program_active)
         bd_dump_video_draw("drawArrays", mode, count, 0, nullptr, first, 0);
@@ -2696,11 +2785,14 @@ extern "C" void bd_glDrawArrays(GLenum mode, GLint first, GLsizei count)
         if (glad_glDrawArrays)
             glad_glDrawArrays(mode, first, count);
     });
+    if (probe)
+        bd_probe_end("drawArrays", count);
 }
 
 extern "C" void bd_glDrawElements(GLenum mode, GLsizei count, GLenum type,
                                    const void* indices)
 {
+    const bool probe = bd_probe_begin(count);
     bd_census_draw(count, 0);
     if (g_video_program_active)
         bd_dump_video_draw("drawElements", mode, count, type, indices, 0, 0);
@@ -2712,11 +2804,14 @@ extern "C" void bd_glDrawElements(GLenum mode, GLsizei count, GLenum type,
         if (glad_glDrawElements)
             glad_glDrawElements(mode, count, type, indices);
     });
+    if (probe)
+        bd_probe_end("drawElements", count);
 }
 
 extern "C" void bd_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count,
                                          GLsizei instances)
 {
+    const bool probe = bd_probe_begin(count);
     bd_census_draw(count, instances);
     if (g_video_program_active)
         bd_dump_video_draw("drawArraysInstanced", mode, count, 0, nullptr, first,
@@ -2727,11 +2822,14 @@ extern "C" void bd_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count
         if (glad_glDrawArraysInstanced)
             glad_glDrawArraysInstanced(mode, first, count, instances);
     });
+    if (probe)
+        bd_probe_end("drawArraysInstanced", count);
 }
 
 extern "C" void bd_glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
                                            const void* indices, GLsizei instances)
 {
+    const bool probe = bd_probe_begin(count);
     bd_census_draw(count, instances);
     if (g_video_program_active)
         bd_dump_video_draw("drawElementsInstanced", mode, count, type, indices, 0,
@@ -2742,6 +2840,8 @@ extern "C" void bd_glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum ty
         if (glad_glDrawElementsInstanced)
             glad_glDrawElementsInstanced(mode, count, type, indices, instances);
     });
+    if (probe)
+        bd_probe_end("drawElementsInstanced", count);
 }
 
 extern "C" void bd_glUseProgram(GLuint program)
