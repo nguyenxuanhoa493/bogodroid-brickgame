@@ -779,14 +779,15 @@ namespace il2cpp_patch {
         int   arg   = 0;   // which param holds the obj pointer (0-based); -1 = `this`
         int   field = -1;  // field offset inside that pointer
         float mult  = 1.0f;
-        int   mode  = 0;   // 0=scale, 1=freeze
+        int   mode  = 0;   // 0=scale, 1=freeze, 2=force_return, 3=log
         int   src_field = -1;   // freeze: copy from this offset; <0 => use setval
         int   type  = 0;   // 0=f32, 1=i32 (field/src width)
         float setval = 0;  // freeze constant when src_field<0
+        int   logged = 0;  // mode 3: calls logged so far (capped)
         uintptr_t orig = 0;
     };
 
-    static const int MAXP = 8;
+    static const int MAXP = 16;
     static Patch        g_p[MAXP];
     static int          g_n = 0;
     static so_module*   g_mod = nullptr;
@@ -825,12 +826,23 @@ namespace il2cpp_patch {
     //   FORCE_RETURN (mode 2): call original (side effects preserved), then return
     //                    a constant (int)setval instead of its real return. Used to
     //                    pin a bool/int gate true (e.g. "skill ready" → no cooldown).
+    //   LOG (mode 3):    call original, log one line per call (first 64 only) with
+    //                    the raw argument registers. Diagnostics only: answers
+    //                    "did this managed method run at all?" without a debugger.
     #define IL2CPP_HOOK(K) \
     static uintptr_t hook##K(uintptr_t x0,uintptr_t x1,uintptr_t x2,uintptr_t x3, \
                              uintptr_t x4,uintptr_t x5,uintptr_t x6,uintptr_t x7){ \
         Patch* p = &g_p[K]; \
         uintptr_t* a[8] = {&x0,&x1,&x2,&x3,&x4,&x5,&x6,&x7}; \
         uintptr_t obj = (p->arg < 0) ? x0 : *a[1 + p->arg]; \
+        if (p->mode == 3) { \
+            if (p->logged < 64) { \
+                ++p->logged; \
+                BD_LOG("HOOK", "%s.%s x0=%p x1=%p x2=%p x3=%p", p->cls.c_str(), \
+                       p->method.c_str(), (void*)x0, (void*)x1, (void*)x2, (void*)x3); \
+            } \
+            return ((orig8_t)p->orig)(x0,x1,x2,x3,x4,x5,x6,x7); \
+        } \
         if (p->mode == 0) { \
             if (p->field >= 0 && obj) { \
                 float* f = (float*)(obj + p->field); \
@@ -856,8 +868,12 @@ namespace il2cpp_patch {
     }
     IL2CPP_HOOK(0) IL2CPP_HOOK(1) IL2CPP_HOOK(2) IL2CPP_HOOK(3)
     IL2CPP_HOOK(4) IL2CPP_HOOK(5) IL2CPP_HOOK(6) IL2CPP_HOOK(7)
+    IL2CPP_HOOK(8) IL2CPP_HOOK(9) IL2CPP_HOOK(10) IL2CPP_HOOK(11)
+    IL2CPP_HOOK(12) IL2CPP_HOOK(13) IL2CPP_HOOK(14) IL2CPP_HOOK(15)
     static void* g_hookfn[MAXP] = { (void*)hook0,(void*)hook1,(void*)hook2,(void*)hook3,
-                                    (void*)hook4,(void*)hook5,(void*)hook6,(void*)hook7 };
+                                    (void*)hook4,(void*)hook5,(void*)hook6,(void*)hook7,
+                                    (void*)hook8,(void*)hook9,(void*)hook10,(void*)hook11,
+                                    (void*)hook12,(void*)hook13,(void*)hook14,(void*)hook15 };
 
     static void* find_image(const char* want) {
         void* dom = il2cpp_domain_get();
@@ -960,6 +976,9 @@ namespace il2cpp_patch {
             if (p->mode == 2)
                 BD_LOG("DMG", "patch ACTIVE [force_return]: %s.%s = %d @ %p",
                        p->cls.c_str(), p->method.c_str(), (int)p->setval, (void*)ptr);
+            else if (p->mode == 3)
+                BD_LOG("DMG", "patch ACTIVE [log]: %s.%s(argc %d) @ %p",
+                       p->cls.c_str(), p->method.c_str(), p->argc, (void*)ptr);
             else if (p->mode == 1)
                 BD_LOG("DMG", "patch ACTIVE [freeze]: %s.%s arg%d field0x%x = %s @ %p",
                        p->cls.c_str(), p->method.c_str(), p->arg, p->field,
@@ -1002,13 +1021,17 @@ namespace il2cpp_patch {
             p.field  = (int)(*t)["field"].value<int64_t>().value_or(-1);
             p.mult   = (float)(*t)["mult"].value<double>().value_or(1.0);
             std::string mode = (*t)["mode"].value<std::string>().value_or("scale");
-            p.mode      = (mode == "freeze") ? 1 : (mode == "force_return") ? 2 : 0;
+            p.mode      = (mode == "freeze") ? 1
+                        : (mode == "force_return") ? 2
+                        : (mode == "log") ? 3 : 0;
             p.src_field = (int)(*t)["src_field"].value<int64_t>().value_or(-1);
             p.setval    = (float)(*t)["setval"].value<double>().value_or(0.0);
             p.type      = ((*t)["type"].value<std::string>().value_or("f32") == "i32") ? 1 : 0;
             bool enabled = (*t)["enabled"].value<bool>().value_or(true);
             if (p.cls.empty() || p.method.empty()) continue;
-            if (p.mode != 2 && p.field < 0) continue;      // scale/freeze need a field; force_return doesn't
+            if (p.mode == 0 || p.mode == 1) {
+                if (p.field < 0) continue;                  // scale/freeze need a field
+            }
             if (!enabled) continue;
             if (p.mode == 0 && p.mult == 1.0f) continue;   // scale "正常" = no change
             if (g_n < MAXP) g_p[g_n++] = p;
