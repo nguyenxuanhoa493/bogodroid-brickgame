@@ -4,6 +4,7 @@
 #include "globals.h"
 #include <cstdlib>
 #include <cctype>
+#include <cstdio>
 #include <execinfo.h>
 #include <iostream>
 
@@ -766,6 +767,9 @@ namespace il2cpp_patch {
     typedef uint32_t    (*p_method_get_param_count)(void* method);
     typedef void*       (*p_class_get_fields)(void* klass, void** iter);
     typedef const char* (*p_field_get_name)(void* field);
+    typedef size_t      (*p_field_get_offset)(void* field);
+    typedef void        (*p_field_get_value)(void* field, void* obj, void* value);
+    typedef void*       (*p_object_get_class)(void* obj);
 
     static p_domain_get                 il2cpp_domain_get;
     static p_domain_get_assemblies      il2cpp_domain_get_assemblies;
@@ -784,6 +788,9 @@ namespace il2cpp_patch {
     static p_method_get_param_count     il2cpp_method_get_param_count;
     static p_class_get_fields           il2cpp_class_get_fields;
     static p_field_get_name             il2cpp_field_get_name;
+    static p_field_get_offset           il2cpp_field_get_offset;
+    static p_field_get_value            il2cpp_field_get_value;
+    static p_object_get_class           il2cpp_object_get_class;
     static bool                         g_probe_app_paths = false;
     static std::string                  g_dump_filter;
 
@@ -810,6 +817,7 @@ namespace il2cpp_patch {
         float setval = 0;  // freeze constant when src_field<0
         int   log_arg = 0; // mode 3: raw register index (x0=0) to print
         bool  arg_string = false; // mode 3: log_arg holds an Il2CppString*
+        bool  dump_fields = false; // mode 3: after orig, dump this's fields
         int   logged = 0;  // mode 3: calls logged so far (capped)
         uintptr_t orig = 0;
     };
@@ -844,6 +852,7 @@ namespace il2cpp_patch {
                                  uintptr_t,uintptr_t,uintptr_t,uintptr_t);
 
     static std::string il2cpp_to_utf8(void* s);
+    static void bd_dump_object_fields(void* obj);
 
     // One hook per slot, statically bound to g_p[K]. Hot path is a couple of
     // loads/stores around a single original call — only fires when the game
@@ -876,7 +885,9 @@ namespace il2cpp_patch {
                            p->method.c_str(), (void*)x0, (void*)x1, (void*)x2, (void*)x3); \
                 } \
             } \
-            return ((orig8_t)p->orig)(x0,x1,x2,x3,x4,x5,x6,x7); \
+            uintptr_t ret = ((orig8_t)p->orig)(x0,x1,x2,x3,x4,x5,x6,x7); \
+            if (p->dump_fields) bd_dump_object_fields((void*)x0); \
+            return ret; \
         } \
         if (p->mode == 0) { \
             if (p->field >= 0 && obj) { \
@@ -951,6 +962,67 @@ namespace il2cpp_patch {
         }
         return out;
     }
+
+    // dump_fields (log hooks): print every declared instance field of `this`.
+    // Fields are read through il2cpp_field_get_value into a wide buffer, never
+    // by raw 8-byte loads: a 1-byte field at the end of an allocation would
+    // fault. Values that land in a mapped region are dereferenced once to name
+    // the pointed object's class — that is how a suspended coroutine's
+    // <>2__current reveals what it waits on (WaitForSeconds, AsyncOperation,
+    // a nested IEnumerator, ...).
+    static bool bd_ptr_mapped(uintptr_t p) {
+        static std::vector<std::pair<uintptr_t, uintptr_t>> ranges;
+        static bool loaded = false;
+        if (!loaded) {
+            loaded = true;
+            std::ifstream maps("/proc/self/maps");
+            std::string line;
+            while (std::getline(maps, line)) {
+                unsigned long long a = 0, b = 0;
+                if (sscanf(line.c_str(), "%llx-%llx", &a, &b) == 2 && b > a)
+                    ranges.push_back({ (uintptr_t)a, (uintptr_t)b });
+            }
+        }
+        for (const auto& r : ranges) if (p >= r.first && p < r.second) return true;
+        return false;
+    }
+
+    static void bd_dump_object_fields(void* obj) {
+        if (!obj) return;
+        if (!il2cpp_object_get_class || !il2cpp_class_get_fields || !il2cpp_field_get_name ||
+            !il2cpp_field_get_offset || !il2cpp_field_get_value) {
+            BD_LOG("FIELDS", "field-dump exports missing");
+            return;
+        }
+        void* klass = il2cpp_object_get_class(obj);
+        if (!klass) return;
+        const char* cn = il2cpp_class_get_name ? il2cpp_class_get_name(klass) : nullptr;
+        BD_LOG("FIELDS", "%s @ %p:", cn ? cn : "?", obj);
+        void* it = nullptr;
+        int n = 0;
+        while (void* f = il2cpp_class_get_fields(klass, &it)) {
+            if (++n > 48) { BD_LOG("FIELDS", "  ... (capped)"); break; }
+            const char* fn = il2cpp_field_get_name(f);
+            alignas(16) unsigned char buf[256] = {};
+            il2cpp_field_get_value(f, obj, buf);
+            uint64_t value = 0;
+            memcpy(&value, buf, sizeof(value));
+            std::string extra;
+            if (value && bd_ptr_mapped((uintptr_t)value)) {
+                uintptr_t inner_klass = *(uintptr_t*)(uintptr_t)value;
+                if (bd_ptr_mapped(inner_klass)) {
+                    const char* vn = il2cpp_class_get_name ? il2cpp_class_get_name((void*)inner_klass) : nullptr;
+                    const char* vns = il2cpp_class_get_namespace ? il2cpp_class_get_namespace((void*)inner_klass) : nullptr;
+                    extra = " -> ";
+                    if (vns && *vns) { extra += vns; extra += '.'; }
+                    extra += vn ? vn : "?";
+                }
+            }
+            BD_LOG("FIELDS", "  +0x%zx %s = 0x%llx%s", il2cpp_field_get_offset(f),
+                   fn ? fn : "?", (unsigned long long)value, extra.c_str());
+        }
+    }
+
     static void probe_app_paths(const char* tag) {
         if (!g_probe_app_paths || !il2cpp_runtime_invoke || !il2cpp_class_from_name) return;
         void* img = find_image("UnityEngine.CoreModule");
@@ -1166,6 +1238,8 @@ namespace il2cpp_patch {
     //   log:             mode="log", first 64 calls print the argument registers.
     //                    log_arg=N (x0=0) + arg_string=true prints that register
     //                    as an Il2CppString (e.g. SceneManager.LoadScene(name)).
+    //                    dump_fields=true also prints every field of `this` after
+    //                    the call (what a suspended coroutine is waiting on).
     //   assembly/namespace select a non-game image/namespace (default
     //   Assembly-CSharp + ""), e.g. assembly="UnityEngine.CoreModule".
     static void load_config() {
@@ -1193,6 +1267,7 @@ namespace il2cpp_patch {
             p.log_arg   = (int)(*t)["log_arg"].value<int64_t>().value_or(0);
             if (p.log_arg < 0 || p.log_arg > 7) p.log_arg = 0;
             p.arg_string = (*t)["arg_string"].value<bool>().value_or(false);
+            p.dump_fields = (*t)["dump_fields"].value<bool>().value_or(false);
             bool enabled = (*t)["enabled"].value<bool>().value_or(true);
             if (p.cls.empty() || p.method.empty()) continue;
             if (p.mode == 0 || p.mode == 1) {
@@ -1221,7 +1296,10 @@ namespace il2cpp_patch {
         il2cpp_class_get_method_from_name = (p_class_get_method_from_name)so_symbol(lil2cpp, "il2cpp_class_get_method_from_name");
         // Needed by the BD_PROBE_APPPATHS probe only; not part of the hard set.
         il2cpp_runtime_invoke = (p_runtime_invoke)so_symbol(lil2cpp, "il2cpp_runtime_invoke");
-        if (!g_dump_filter.empty()) {
+        // Introspection exports: BD_IL2CPP_DUMP, and log hooks with dump_fields.
+        bool wants_fields = false;
+        for (int i = 0; i < g_n; i++) if (g_p[i].dump_fields) wants_fields = true;
+        if (!g_dump_filter.empty() || wants_fields) {
             il2cpp_image_get_class_count    = (p_image_get_class_count)so_symbol(lil2cpp, "il2cpp_image_get_class_count");
             il2cpp_image_get_class          = (p_image_get_class)so_symbol(lil2cpp, "il2cpp_image_get_class");
             il2cpp_class_get_name           = (p_class_get_name)so_symbol(lil2cpp, "il2cpp_class_get_name");
@@ -1232,6 +1310,9 @@ namespace il2cpp_patch {
             il2cpp_method_get_param_count   = (p_method_get_param_count)so_symbol(lil2cpp, "il2cpp_method_get_param_count");
             il2cpp_class_get_fields         = (p_class_get_fields)so_symbol(lil2cpp, "il2cpp_class_get_fields");
             il2cpp_field_get_name           = (p_field_get_name)so_symbol(lil2cpp, "il2cpp_field_get_name");
+            il2cpp_field_get_offset         = (p_field_get_offset)so_symbol(lil2cpp, "il2cpp_field_get_offset");
+            il2cpp_field_get_value          = (p_field_get_value)so_symbol(lil2cpp, "il2cpp_field_get_value");
+            il2cpp_object_get_class         = (p_object_get_class)so_symbol(lil2cpp, "il2cpp_object_get_class");
         }
         if (!il2cpp_domain_get || !il2cpp_class_from_name || !il2cpp_class_get_method_from_name) {
             BD_LOG("DMG", "missing il2cpp API exports, patches disabled");
