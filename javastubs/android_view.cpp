@@ -2,6 +2,7 @@
 extern toml::table config;
 
 #include "android.h"
+#include "applovin.h"
 #include "baron/baron.h"
 #include "bd_video.h"
 #include "device_display.h"
@@ -672,6 +673,12 @@ extern "C" void bd_choreographer_signal_vsync(void)
 // The core dispatch logic, with the critical isRealVSync flag.
 void jnivm::android::view::Choreographer::dispatchFrameCallbacks(bool isRealVSync)
 {
+    // Ad SDK callbacks are queued by the javastubs and released here, once the
+    // Java call that produced them has returned (the real SDK posts them from
+    // a background thread). Draining on every frame keeps them flowing even
+    // when the game registers no FrameCallback of its own.
+    BDAppLovinFlushEvents();
+
     long long now = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch())
                         .count();
