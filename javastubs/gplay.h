@@ -7,6 +7,20 @@
 
 void InitJNIGooglePlayClasses(FakeJni::Jvm* vm);
 
+// UnityPlayerActivity appears in erased-overload signatures below. unity.h,
+// which defines it, is a project header this shared header cannot include, so
+// only the name is needed here; the descriptor (in gplay.cpp) pulls the
+// definition.
+namespace jnivm {
+namespace com {
+    namespace unity3d {
+        namespace player {
+            class UnityPlayerActivity;
+        }
+    }
+}
+}
+
 namespace jnivm {
 namespace com {
     namespace google {
@@ -216,6 +230,11 @@ namespace com {
                         std::shared_ptr<BillingClientBuilder> setListener(std::shared_ptr<FakeJni::JObject> listener);
                         std::shared_ptr<BillingClientBuilder> enablePendingPurchases(std::shared_ptr<PendingPurchasesParams> params);
                         std::shared_ptr<BillingClient> build();
+                        // Erased spellings. C++ cannot overload on return type
+                        // alone, so the Object-returning variants get distinct
+                        // C++ names and share the Java name in the descriptor.
+                        std::shared_ptr<jnivm::Object> enablePendingPurchasesNoArg();
+                        std::shared_ptr<jnivm::Object> buildErased();
                     };
 
                     class BillingResult : public FakeJni::JObject {
@@ -235,6 +254,12 @@ namespace com {
                         DEFINE_CLASS_NAME("com/android/billingclient/api/BillingClient")
                         static std::shared_ptr<BillingClientBuilder> newBuilder(
                             std::shared_ptr<jnivm::android::content::Context> context);
+                        // Unity's AndroidJavaObject bridge erases the declared
+                        // activity type to the concrete runtime class and the
+                        // builder return to java.lang.Object:
+                        //   (Lcom/unity3d/player/UnityPlayerActivity;)Ljava/lang/Object;
+                        static std::shared_ptr<jnivm::Object> newBuilder(
+                            std::shared_ptr<jnivm::com::unity3d::player::UnityPlayerActivity> activity);
                         void startConnection(std::shared_ptr<FakeJni::JObject> listener);
                         bool isReady();
                         void endConnection();

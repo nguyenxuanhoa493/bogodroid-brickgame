@@ -4,6 +4,14 @@
 #include "toml++/toml.hpp"
 #include <typeinfo>
 
+// Only the Unity-based projects ship unity.h; the GameMaker/Limbo loaders
+// compile this file too, so the erased UnityPlayerActivity overloads are
+// conditional instead of unconditional.
+#if __has_include("unity.h")
+#include "unity.h"
+#define BD_GPLAY_HAVE_UNITY_ACTIVITY 1
+#endif
+
 extern toml::table config;
 
 using namespace jnivm::com::google::android::vending::licensing;
@@ -218,6 +226,15 @@ std::shared_ptr<BillingClientBuilder> BillingClient::newBuilder(std::shared_ptr<
     return std::make_shared<BillingClientBuilder>();
 }
 
+#ifdef BD_GPLAY_HAVE_UNITY_ACTIVITY
+std::shared_ptr<jnivm::Object> BillingClient::newBuilder(
+    std::shared_ptr<jnivm::com::unity3d::player::UnityPlayerActivity> activity)
+{
+    BD_LOG("GPLAY", "billing newBuilder(activity=%p, erased) -> inert builder", activity.get());
+    return std::static_pointer_cast<jnivm::Object>(std::make_shared<BillingClientBuilder>());
+}
+#endif
+
 std::shared_ptr<BillingClientBuilder> BillingClientBuilder::setListener(std::shared_ptr<FakeJni::JObject> listener)
 {
     BD_LOG("GPLAY", "billing setListener(%p)", listener.get());
@@ -234,6 +251,18 @@ std::shared_ptr<BillingClient> BillingClientBuilder::build()
 {
     BD_LOG("GPLAY", "billing build() -> inert BillingClient");
     return std::make_shared<BillingClient>();
+}
+
+std::shared_ptr<jnivm::Object> BillingClientBuilder::enablePendingPurchasesNoArg()
+{
+    BD_LOG("GPLAY", "billing enablePendingPurchases(erased)");
+    return std::static_pointer_cast<jnivm::Object>(shared_from_this());
+}
+
+std::shared_ptr<jnivm::Object> BillingClientBuilder::buildErased()
+{
+    BD_LOG("GPLAY", "billing build(erased) -> inert BillingClient");
+    return std::static_pointer_cast<jnivm::Object>(std::make_shared<BillingClient>());
 }
 
 void BillingClient::startConnection(std::shared_ptr<FakeJni::JObject> listener)
@@ -322,7 +351,14 @@ std::shared_ptr<PendingPurchasesParams> PendingPurchasesParamsBuilder::build()
 BEGIN_NATIVE_DESCRIPTOR(BillingClient) {
     FakeJni::Constructor<BillingClient> {},
 },
-    { FakeJni::Function<&BillingClient::newBuilder> {}, "newBuilder", FakeJni::JMethodID::STATIC },
+    { FakeJni::Function<static_cast<std::shared_ptr<BillingClientBuilder> (*)(
+          std::shared_ptr<jnivm::android::content::Context>)>(
+          &BillingClient::newBuilder)> {}, "newBuilder", FakeJni::JMethodID::STATIC },
+#ifdef BD_GPLAY_HAVE_UNITY_ACTIVITY
+    { FakeJni::Function<static_cast<std::shared_ptr<jnivm::Object> (*)(
+          std::shared_ptr<jnivm::com::unity3d::player::UnityPlayerActivity>)>(
+          &BillingClient::newBuilder)> {}, "newBuilder", FakeJni::JMethodID::STATIC },
+#endif
     { FakeJni::Function<&BillingClient::startConnection> {}, "startConnection", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&BillingClient::isReady> {}, "isReady", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&BillingClient::endConnection> {}, "endConnection", FakeJni::JMethodID::PUBLIC },
@@ -336,7 +372,9 @@ BEGIN_NATIVE_DESCRIPTOR(BillingClient) {
     BEGIN_NATIVE_DESCRIPTOR(BillingClientBuilder) { FakeJni::Constructor<BillingClientBuilder> {} },
     { FakeJni::Function<&BillingClientBuilder::setListener> {}, "setListener", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&BillingClientBuilder::enablePendingPurchases> {}, "enablePendingPurchases", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingClientBuilder::enablePendingPurchasesNoArg> {}, "enablePendingPurchases", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&BillingClientBuilder::build> {}, "build", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&BillingClientBuilder::buildErased> {}, "build", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(BillingResult) { FakeJni::Constructor<BillingResult> {} },
