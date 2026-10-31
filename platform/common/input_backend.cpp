@@ -895,6 +895,46 @@ void InputBackend::runEventLoop()
             BD_LOG("PAD", "axis replay armed: %zu step(s)", axis_replay.size());
     }
 
+    // Diagnostic tap playback. BD_TAP_REPLAY="4000:0.5:0.5,9000:0.5:0.5:200"
+    // injects screen taps at the given millisecond offsets, coordinates as
+    // 0..1 fractions of the display, optional per-tap hold in ms. Lets a
+    // headless run answer "is the splash waiting for a tap?" without a human.
+    struct TapReplayStep { Uint32 at, hold; float fx, fy; bool down_done, up_done; };
+    std::vector<TapReplayStep> tap_replay;
+    if (const char* spec = std::getenv("BD_TAP_REPLAY")) {
+        std::string s(spec);
+        size_t start = 0;
+        while (start < s.size()) {
+            size_t comma = s.find(',', start);
+            std::string item = s.substr(start, comma == std::string::npos
+                                               ? std::string::npos : comma - start);
+            start = (comma == std::string::npos) ? s.size() : comma + 1;
+            float parts[4] = {0.0f, 0.5f, 0.5f, 120.0f};
+            int n = 0;
+            size_t pos = 0;
+            while (n < 4 && pos <= item.size()) {
+                size_t colon = item.find(':', pos);
+                std::string field = item.substr(pos, colon == std::string::npos
+                                                     ? std::string::npos : colon - pos);
+                if (!field.empty())
+                    parts[n++] = (float)std::atof(field.c_str());
+                if (colon == std::string::npos) break;
+                pos = colon + 1;
+            }
+            if (n < 3) continue;
+            TapReplayStep step{};
+            step.at = (Uint32)std::max(0.0f, parts[0]);
+            step.fx = std::min(1.0f, std::max(0.0f, parts[1]));
+            step.fy = std::min(1.0f, std::max(0.0f, parts[2]));
+            step.hold = (Uint32)std::max(1.0f, parts[3]);
+            tap_replay.push_back(step);
+            BD_LOG("TAP", "replay at %u ms (%.2f,%.2f) hold %u ms",
+                   step.at, step.fx, step.fy, step.hold);
+        }
+        if (!tap_replay.empty())
+            BD_LOG("TAP", "replay armed: %zu step(s)", tap_replay.size());
+    }
+
     auto replayInject = [&](int button, bool down) {
         const char* bname = SDL_GameControllerGetStringForButton(
             (SDL_GameControllerButton)button);
@@ -945,8 +985,26 @@ void InputBackend::runEventLoop()
     };
 
     auto replayTick = [&]() {
-        if (replay.empty() && power_replay.empty() && axis_replay.empty()) return;
+        if (replay.empty() && power_replay.empty() && axis_replay.empty() &&
+            tap_replay.empty())
+            return;
         Uint32 now = SDL_GetTicks() - replay_t0;
+        for (auto& step : tap_replay) {
+            const bool down_due = !step.down_done && now >= step.at;
+            const bool up_due = step.down_done && !step.up_done && now >= step.at + step.hold;
+            if (!down_due && !up_due) continue;
+            const int w = bd_device_display_width();
+            const int h = bd_device_display_height();
+            if (w <= 0 || h <= 0) continue;
+            const float x = step.fx * (float)w;
+            const float y = step.fy * (float)h;
+            if (down_due) step.down_done = true;
+            if (up_due) step.up_done = true;
+            const bool down = !up_due;
+            BD_LOG("TAP", "REPLAY %s at (%.1f, %.1f) of %dx%d",
+                   down ? "DOWN" : "UP", x, y, w, h);
+            injectTouch(0, x, y, (float)w, (float)h, down, "replay");
+        }
         for (auto& step : axis_replay) {
             if (!step.done && now >= step.at) {
                 step.done = true;

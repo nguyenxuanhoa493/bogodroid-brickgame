@@ -185,10 +185,10 @@ void MaxUnityPlugin::showInterstitial(std::shared_ptr<FakeJni::JString> adUnitId
                                       std::shared_ptr<FakeJni::JString>)
 {
     const std::string id = id_of(adUnitId);
-    if (!g_interstitial_ready.erase(id)) {
-        BD_LOG("APPLOVIN", "showInterstitial(%s): nothing loaded", id.c_str());
-        return;
-    }
+    // A show with nothing loaded still has to answer: games chain
+    // show -> (Displayed/Failed) -> Hidden and hold the splash until the ad
+    // closes. Returning silently leaves that wait unfinished forever.
+    g_interstitial_ready.erase(id);
     BD_LOG("APPLOVIN", "showInterstitial(%s, placement='%s'): displayed+hidden",
            id.c_str(), id_of(placement).c_str());
     queue_event(ad_event("OnInterstitialDisplayedEvent", id, "INTERSTITIAL"));
@@ -213,10 +213,7 @@ void MaxUnityPlugin::showRewardedAd(std::shared_ptr<FakeJni::JString> adUnitId,
                                     std::shared_ptr<FakeJni::JString>)
 {
     const std::string id = id_of(adUnitId);
-    if (!g_rewarded_ready.erase(id)) {
-        BD_LOG("APPLOVIN", "showRewardedAd(%s): nothing loaded", id.c_str());
-        return;
-    }
+    g_rewarded_ready.erase(id);
     BD_LOG("APPLOVIN", "showRewardedAd(%s, placement='%s'): displayed+rewarded+hidden",
            id.c_str(), id_of(placement).c_str());
     queue_event(ad_event("OnRewardedAdDisplayedEvent", id, "REWARDED"));
@@ -242,10 +239,7 @@ void MaxUnityPlugin::showAppOpenAd(std::shared_ptr<FakeJni::JString> adUnitId,
                                    std::shared_ptr<FakeJni::JString>)
 {
     const std::string id = id_of(adUnitId);
-    if (!g_appopen_ready.erase(id)) {
-        BD_LOG("APPLOVIN", "showAppOpenAd(%s): nothing loaded", id.c_str());
-        return;
-    }
+    g_appopen_ready.erase(id);
     BD_LOG("APPLOVIN", "showAppOpenAd(%s, placement='%s'): displayed+hidden",
            id.c_str(), id_of(placement).c_str());
     queue_event(ad_event("OnAppOpenAdDisplayedEvent", id, "APPOPEN"));
