@@ -2425,6 +2425,7 @@ struct BdDrawStat {
 };
 
 static std::map<std::pair<GLuint, GLuint>, BdDrawStat> g_draw_stats;
+static std::set<GLuint> g_census_fbos;
 static uint64_t g_draw_total = 0;
 
 static void bd_census_draw(GLsizei count, GLsizei instances)
@@ -2441,6 +2442,81 @@ static void bd_census_draw(GLsizei count, GLsizei instances)
     stat.draws += 1;
     stat.verts += (uint64_t)count * (uint64_t)(instances > 0 ? instances : 1);
     ++g_draw_total;
+    if (fbo != 0 && g_census_fbos.size() < 16)
+        g_census_fbos.insert((GLuint)fbo);
+}
+
+// Read back one render target so "the scene is black" can be split into "the
+// scene drew black" and "the present blit read the wrong texture".
+static void bd_census_dump_fbo(GLuint fbo, const char* prefix, int swap_index)
+{
+    glad_glBindFramebuffer(0x8D40 /*GL_FRAMEBUFFER*/, fbo);
+    GLint attachment_type = 0;
+    GLint attachment = 0;
+    glad_glGetFramebufferAttachmentParameteriv(
+        0x8D40, 0x8CE0 /*GL_COLOR_ATTACHMENT0*/,
+        0x8CD0 /*GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE*/, &attachment_type);
+    glad_glGetFramebufferAttachmentParameteriv(
+        0x8D40, 0x8CE0, 0x8CD1 /*OBJECT_NAME*/, &attachment);
+    int width = 0;
+    int height = 0;
+    if (attachment_type == 0x1702 /*GL_TEXTURE*/ && attachment > 0 &&
+        glad_glGetTexLevelParameteriv) {
+        glad_glBindTexture(BD_GL_TEXTURE_2D, (GLuint)attachment);
+        glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0, 0x1000, &width);
+        glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0, 0x1001, &height);
+    } else if (attachment_type == 0x8D41 /*GL_RENDERBUFFER*/ &&
+               glad_glGetRenderbufferParameteriv) {
+        glad_glGetRenderbufferParameteriv(0x8D41, 0x8D42, &width);
+        glad_glGetRenderbufferParameteriv(0x8D41, 0x8D43, &height);
+    }
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
+        BD_LOG("CENSUS", "rt fbo=%u attachment=%d type=0x%x size=%dx%d (skipped)",
+               fbo, attachment, (unsigned)attachment_type, width, height);
+        return;
+    }
+    std::vector<uint8_t> pixels((size_t)width * (size_t)height * 3u);
+    glad_glFinish();
+    glad_glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE,
+                      pixels.data());
+    char path[512];
+    snprintf(path, sizeof(path), "%s.fbo%u.%d.ppm", prefix, fbo, swap_index);
+    FILE* file = fopen(path, "wb");
+    if (!file)
+        return;
+    fprintf(file, "P6\n%d %d\n255\n", width, height);
+    for (int y = height - 1; y >= 0; --y)
+        fwrite(pixels.data() + (size_t)y * width * 3u, 1, (size_t)width * 3u,
+               file);
+    fclose(file);
+    uint64_t sum = 0;
+    for (size_t p = 0; p < pixels.size(); p += 3)
+        sum += pixels[p];
+    BD_LOG("CENSUS", "rt fbo=%u attachment=%d %dx%d -> %s mean R=%llu", fbo,
+           attachment, width, height, path,
+           (unsigned long long)(sum / (pixels.size() / 3)));
+}
+
+extern "C" void bd_draw_census_dump(int swap_index)
+{
+    if (!bd_draw_census_enabled() || g_census_fbos.empty() ||
+        !glad_glBindFramebuffer || !glad_glReadPixels || !glad_glGetIntegerv ||
+        !glad_glGetFramebufferAttachmentParameteriv)
+        return;
+    const char* prefix = getenv("BD_DUMP_FRAME");
+    if (!prefix || !*prefix)
+        return;
+    const char* at_env = getenv("BD_DUMP_FRAME_AT");
+    int at = at_env && *at_env ? atoi(at_env) : 600;
+    if (at <= 0)
+        at = 600;
+    if (swap_index != at && swap_index != at * 2 && swap_index != at * 3)
+        return;
+    GLint previous_fbo = 0;
+    glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &previous_fbo);
+    for (GLuint fbo : g_census_fbos)
+        bd_census_dump_fbo(fbo, prefix, swap_index);
+    glad_glBindFramebuffer(0x8D40, (GLuint)previous_fbo);
 }
 
 extern "C" void bd_draw_census_swap(int swap_index)

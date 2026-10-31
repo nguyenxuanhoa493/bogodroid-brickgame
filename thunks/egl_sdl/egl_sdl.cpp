@@ -473,6 +473,7 @@ static uint32_t bd_fb_channel(uint8_t value, const fb_bitfield& field)
 // video-coloured RT means the present path failed.
 extern "C" void bd_dump_video_rt(int swap_index);
 extern "C" void bd_draw_census_swap(int swap_index);
+extern "C" void bd_draw_census_dump(int swap_index);
 
 // Debug aid: dump real rendered frames to PPM so a black screen can be told
 // apart from a black video texture. Enabled by BD_DUMP_FRAME=<path prefix>
@@ -485,6 +486,7 @@ static void bd_dump_frame_if_requested()
     ++swap_index;
     bd_dump_video_rt(swap_index);
     bd_draw_census_swap(swap_index);
+    bd_draw_census_dump(swap_index);
     const char* prefix = getenv("BD_DUMP_FRAME");
     if (!prefix || !*prefix)
         return;
