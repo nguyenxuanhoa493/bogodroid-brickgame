@@ -886,7 +886,7 @@ namespace il2cpp_patch {
                 } \
             } \
             uintptr_t ret = ((orig8_t)p->orig)(x0,x1,x2,x3,x4,x5,x6,x7); \
-            if (p->dump_fields) bd_dump_object_fields((void*)x0); \
+            if (p->dump_fields && p->logged <= 6) bd_dump_object_fields((void*)x0); \
             return ret; \
         } \
         if (p->mode == 0) { \
@@ -963,14 +963,14 @@ namespace il2cpp_patch {
         return out;
     }
 
-    // dump_fields (log hooks): print every declared instance field of `this`.
-    // Fields are read through il2cpp_field_get_value into a wide buffer, never
-    // by raw 8-byte loads: a 1-byte field at the end of an allocation would
-    // fault. Values that land in a mapped region are dereferenced once to name
-    // the pointed object's class — that is how a suspended coroutine's
-    // <>2__current reveals what it waits on (WaitForSeconds, AsyncOperation,
-    // a nested IEnumerator, ...).
-    static bool bd_ptr_mapped(uintptr_t p) {
+    // dump_fields (log hooks): report a coroutine's state and what it yielded.
+    // Values are read straight out of the object at the offsets il2cpp reports
+    // and only for the compiler-generated state/current slots; a few bytes at
+    // obj+offset are safe, whereas il2cpp_field_get_value copies by field type
+    // size and a wide captured struct overran the caller's buffer (observed as
+    // a SIGSEGV inside the first MoveNext). Pointers are dereferenced only
+    // after a /proc/self/maps range check.
+    static bool bd_region_ok(uintptr_t p, size_t n) {
         static std::vector<std::pair<uintptr_t, uintptr_t>> ranges;
         static bool loaded = false;
         if (!loaded) {
@@ -983,14 +983,47 @@ namespace il2cpp_patch {
                     ranges.push_back({ (uintptr_t)a, (uintptr_t)b });
             }
         }
-        for (const auto& r : ranges) if (p >= r.first && p < r.second) return true;
+        for (const auto& r : ranges) if (p >= r.first && p + n <= r.second) return true;
         return false;
     }
 
     static void bd_dump_object_fields(void* obj) {
         if (!obj) return;
+        if (!bd_region_ok((uintptr_t)obj, sizeof(void*))) {
+            BD_LOG("FIELDS", "%p: object pointer not mapped", obj);
+            return;
+        }
+        // BD_FIELDS_RAW=1: skip every il2cpp call and print the object's words
+        // verbatim. A coroutine lives at {klass, monitor, <>1__state, <>2__current,
+        // ...}, so +0x10 is the state and +0x18 is what it yielded. This is the
+        // fallback when the metadata walk itself misbehaves.
+        static const bool raw = std::getenv("BD_FIELDS_RAW") != nullptr;
+        if (raw) {
+            uintptr_t klass = 0;
+            memcpy(&klass, obj, sizeof(klass));
+            const char* cn = (klass && bd_region_ok(klass, 8) && il2cpp_class_get_name)
+                                 ? il2cpp_class_get_name((void*)klass) : nullptr;
+            BD_LOG("FIELDS", "[raw] %s @ %p:", cn ? cn : "?", obj);
+            for (int i = 0; i < 10; i++) {
+                uintptr_t w = 0;
+                if (!bd_region_ok((uintptr_t)obj + (size_t)i * 8, 8)) break;
+                memcpy(&w, (const char*)obj + (size_t)i * 8, sizeof(w));
+                std::string extra;
+                if (w && bd_region_ok(w, 8) && il2cpp_class_get_name) {
+                    uintptr_t ik = 0;
+                    memcpy(&ik, (const void*)w, sizeof(ik));
+                    if (ik && bd_region_ok(ik, 8)) {
+                        const char* vn = il2cpp_class_get_name((void*)ik);
+                        if (vn) { extra = " -> "; extra += vn; }
+                    }
+                }
+                BD_LOG("FIELDS", "  [%d] +0x%x = 0x%llx%s", i, i * 8,
+                       (unsigned long long)w, extra.c_str());
+            }
+            return;
+        }
         if (!il2cpp_object_get_class || !il2cpp_class_get_fields || !il2cpp_field_get_name ||
-            !il2cpp_field_get_offset || !il2cpp_field_get_value) {
+            !il2cpp_field_get_offset) {
             BD_LOG("FIELDS", "field-dump exports missing");
             return;
         }
@@ -1003,23 +1036,43 @@ namespace il2cpp_patch {
         while (void* f = il2cpp_class_get_fields(klass, &it)) {
             if (++n > 48) { BD_LOG("FIELDS", "  ... (capped)"); break; }
             const char* fn = il2cpp_field_get_name(f);
-            alignas(16) unsigned char buf[256] = {};
-            il2cpp_field_get_value(f, obj, buf);
-            uint64_t value = 0;
-            memcpy(&value, buf, sizeof(value));
-            std::string extra;
-            if (value && bd_ptr_mapped((uintptr_t)value)) {
-                uintptr_t inner_klass = *(uintptr_t*)(uintptr_t)value;
-                if (bd_ptr_mapped(inner_klass)) {
-                    const char* vn = il2cpp_class_get_name ? il2cpp_class_get_name((void*)inner_klass) : nullptr;
-                    const char* vns = il2cpp_class_get_namespace ? il2cpp_class_get_namespace((void*)inner_klass) : nullptr;
-                    extra = " -> ";
-                    if (vns && *vns) { extra += vns; extra += '.'; }
-                    extra += vn ? vn : "?";
-                }
+            if (!fn) continue;
+            size_t off = il2cpp_field_get_offset(f);
+            if (off > 0x1000) { BD_LOG("FIELDS", "  +0x%zx %s (offset out of range)", off, fn); continue; }
+            const char* slot = (const char*)obj + off;
+            if (!bd_region_ok((uintptr_t)slot, sizeof(void*))) {
+                BD_LOG("FIELDS", "  +0x%zx %s (slot unmapped)", off, fn);
+                continue;
             }
-            BD_LOG("FIELDS", "  +0x%zx %s = 0x%llx%s", il2cpp_field_get_offset(f),
-                   fn ? fn : "?", (unsigned long long)value, extra.c_str());
+            if (strncmp(fn, "<>1__state", 10) == 0) {
+                int32_t state = -999;
+                memcpy(&state, slot, sizeof(state));
+                BD_LOG("FIELDS", "  +0x%zx %s = %d", off, fn, state);
+                continue;
+            }
+            if (strncmp(fn, "<>2__current", 12) == 0 ||
+                strncmp(fn, "<>u__", 5) == 0 ||
+                strncmp(fn, "<>4__this", 9) == 0 ||
+                strncmp(fn, "<>7__wrap", 9) == 0) {
+                uint64_t value = 0;
+                memcpy(&value, slot, sizeof(value));
+                std::string extra;
+                if (value && bd_region_ok((uintptr_t)value, sizeof(void*))) {
+                    uintptr_t inner_klass = 0;
+                    memcpy(&inner_klass, (const void*)(uintptr_t)value, sizeof(inner_klass));
+                    if (inner_klass && bd_region_ok(inner_klass, 8) && il2cpp_class_get_name) {
+                        const char* vn = il2cpp_class_get_name((void*)inner_klass);
+                        const char* vns = il2cpp_class_get_namespace ? il2cpp_class_get_namespace((void*)inner_klass) : nullptr;
+                        extra = " -> ";
+                        if (vns && *vns) { extra += vns; extra += '.'; }
+                        extra += vn ? vn : "?";
+                    }
+                }
+                BD_LOG("FIELDS", "  +0x%zx %s = 0x%llx%s", off, fn,
+                       (unsigned long long)value, extra.c_str());
+                continue;
+            }
+            BD_LOG("FIELDS", "  +0x%zx %s (skipped)", off, fn);
         }
     }
 
