@@ -1322,6 +1322,11 @@ std::shared_ptr<jnivm::Object> jnivm::com::unity3d::player::ReflectionHelper::ne
 
     const std::string interfaceName = interface->getName();
     verbose("UnityReflection", "newProxyInstance(%p, %ld, %s) \n", player.get(), nativeHandle, interfaceName.c_str());
+    // Unity 6 creates AndroidJavaProxy listeners here instead of through
+    // JNIBridge.newInterfaceProxy; log them so the gplay/billing paths are
+    // visible in the boot trace.
+    BD_LOG("UnityReflection", "newProxyInstance(handle=%ld) interface=%s",
+           (long)nativeHandle, interfaceName.c_str());
     return std::make_shared<jnivm::bitter::jnibridge::JNIBridgeProxy>(
         nativeHandle, std::set<std::string>{interfaceName},
         jnivm::bitter::jnibridge::JNIBridgeProxy::InvocationMode::ManagedGCHandle);

@@ -338,6 +338,8 @@ template<class T> static std::shared_ptr<T> UnpackJObject(jnivm::Object* obj) {
     }
     const std::type_info& typeInfo = typeid(T);
     printf("Expected %s\n",typeInfo.name());
+    printf("Actual   %s (class %s)\n", typeid(*obj).name(),
+           obj->getClass().getName().c_str());
     throw std::runtime_error("Invalid Reference, Unexpected Type");
 }
 template<> std::shared_ptr<jnivm::Weak> UnpackJObject<jnivm::Weak>(jnivm::Object* obj) {

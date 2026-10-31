@@ -77,6 +77,14 @@ namespace bitter {
             // --- Implementation of java.lang.Runnable ---
             void run() override;
 
+            // Delivers a Java callback to the delegate behind this proxy. The
+            // Google Play stubs receive Unity-side proxies as plain Objects
+            // whose real Java interface is com.google.android.gms.tasks.*,
+            // so they cannot address them through the typed wrapper methods.
+            void deliver(const char* className, const char* methodName,
+                         const char* methodSig,
+                         std::shared_ptr<jnivm::java::lang::Object> arg);
+
             // --- Implementation of android.os.Handler.Callback ---
             bool handleMessage(std::shared_ptr<jnivm::android::os::Message> msg) override;
 

@@ -1,11 +1,14 @@
 #include "gplay.h"
+#include "jnibridge.h"
 #include "logging.h"
 #include "toml++/toml.hpp"
+#include <typeinfo>
 
 extern toml::table config;
 
 using namespace jnivm::com::google::android::vending::licensing;
 using namespace jnivm::com::billingclient::api;
+using namespace jnivm::bitter::jnibridge;
 
 AESObfuscator::AESObfuscator(std::shared_ptr<FakeJni::JByteArray>,
                              std::shared_ptr<FakeJni::JString>,
@@ -48,22 +51,64 @@ jnivm::com::google::android::play::core::tasks::Task::Task(std::shared_ptr<FakeJ
     this->result = res;
 }
 
-std::shared_ptr<jnivm::com::google::android::play::core::tasks::Task> jnivm::com::google::android::play::core::tasks::Task::addOnCompleteListener(std::shared_ptr<jnivm::com::google::android::play::core::tasks::OnCompleteListener> listener)
+// Unity's Play Games plugin wraps its C# callbacks in AndroidJavaProxy objects
+// whose Java interface is com.google.android.gms.tasks.OnSuccessListener etc.
+// Those are JNIBridge proxies, not the play-core listener types, so the
+// callbacks are forwarded by name through the same invoker the engine uses.
+// The fake task is already complete: delivering on registration is what the
+// real (already finished) Java task would do.
+static void bd_task_deliver(std::shared_ptr<FakeJni::JObject> listener,
+                            const char* className, const char* methodName,
+                            const char* methodSig,
+                            std::shared_ptr<FakeJni::JObject> arg)
+{
+    if (!listener) {
+        BD_LOG("GPLAY", "%s.%s: no listener", className, methodName);
+        return;
+    }
+    auto proxy = std::dynamic_pointer_cast<JNIBridgeProxy>(listener);
+    if (!proxy) {
+        BD_LOG("GPLAY", "%s.%s: listener is %s, not a proxy; dropped",
+               className, methodName, typeid(*listener).name());
+        return;
+    }
+    BD_LOG("GPLAY", "%s.%s: delivering", className, methodName);
+    proxy->deliver(className, methodName, methodSig,
+                   std::static_pointer_cast<jnivm::java::lang::Object>(arg));
+}
+
+std::shared_ptr<jnivm::com::google::android::play::core::tasks::Task> jnivm::com::google::android::play::core::tasks::Task::addOnCompleteListener(std::shared_ptr<FakeJni::JObject> listener)
 {
     this->onCompleteListener = listener;
-    return std::dynamic_pointer_cast<Task>(shared_from_this());
+    bd_task_deliver(listener, "com/google/android/gms/tasks/OnCompleteListener",
+                    "onComplete", "(Lcom/google/android/gms/tasks/Task;)V",
+                    std::static_pointer_cast<FakeJni::JObject>(shared_from_this()));
+    return std::static_pointer_cast<Task>(shared_from_this());
 }
 
-std::shared_ptr<jnivm::com::google::android::play::core::tasks::Task> jnivm::com::google::android::play::core::tasks::Task::addOnSuccessListener(std::shared_ptr<jnivm::com::google::android::play::core::tasks::OnSuccessListener> listener)
+std::shared_ptr<jnivm::com::google::android::play::core::tasks::Task> jnivm::com::google::android::play::core::tasks::Task::addOnSuccessListener(std::shared_ptr<FakeJni::JObject> listener)
 {
     this->onSuccessListener = listener;
-    return std::dynamic_pointer_cast<Task>(shared_from_this());
+    bd_task_deliver(listener, "com/google/android/gms/tasks/OnSuccessListener",
+                    "onSuccess", "(Ljava/lang/Object;)V", this->result);
+    return std::static_pointer_cast<Task>(shared_from_this());
 }
 
-std::shared_ptr<jnivm::com::google::android::play::core::tasks::Task> jnivm::com::google::android::play::core::tasks::Task::addOnFailureListener(std::shared_ptr<jnivm::com::google::android::play::core::tasks::OnFailureListener> listener)
+std::shared_ptr<jnivm::com::google::android::play::core::tasks::Task> jnivm::com::google::android::play::core::tasks::Task::addOnFailureListener(std::shared_ptr<FakeJni::JObject> listener)
 {
+    // Nothing fails here: every fake task completes successfully.
     this->onFailureListener = listener;
-    return std::dynamic_pointer_cast<Task>(shared_from_this());
+    return std::static_pointer_cast<Task>(shared_from_this());
+}
+
+bool jnivm::com::google::android::play::core::tasks::Task::isSuccessful()
+{
+    return true;
+}
+
+std::shared_ptr<FakeJni::JObject> jnivm::com::google::android::play::core::tasks::Task::getResult()
+{
+    return this->result;
 }
 
 
@@ -159,6 +204,13 @@ std::shared_ptr<jnivm::com::google::android::play::core::tasks::Task> jnivm::com
     return std::make_shared<jnivm::com::google::android::play::core::tasks::Task>(std::make_shared<jnivm::com::google::android::gms::games::AuthenticationResult>());
 }
 
+bool jnivm::com::google::android::gms::games::AuthenticationResult::isAuthenticated()
+{
+    // No Play Games account on this device: the plugin's Authenticate() ends
+    // with "not signed in" instead of throwing, and the game keeps booting.
+    return false;
+}
+
 // Google Play Billing: inert objects only. See the comment in gplay.h.
 std::shared_ptr<BillingClientBuilder> BillingClient::newBuilder(std::shared_ptr<jnivm::android::content::Context> context)
 {
@@ -186,9 +238,21 @@ std::shared_ptr<BillingClient> BillingClientBuilder::build()
 
 void BillingClient::startConnection(std::shared_ptr<FakeJni::JObject> listener)
 {
-    // Offline: deliberately no callback, so Unity IAP stays "connecting"
-    // instead of failing its store setup inside the managed layer.
-    BD_LOG("GPLAY", "billing startConnection(%p): offline, no callback", listener.get());
+    // No Play Store on this device. Report setup failure straight away: a
+    // never-completing listener leaves Unity IAP awaiting a connection that
+    // cannot happen, which is worse than an honest "store unavailable".
+    BD_LOG("GPLAY", "billing startConnection(%p): delivering BILLING_UNAVAILABLE", listener.get());
+    auto proxy = std::dynamic_pointer_cast<JNIBridgeProxy>(listener);
+    if (!proxy) {
+        if (listener)
+            BD_LOG("GPLAY", "billing listener is %s, not a proxy", typeid(*listener).name());
+        return;
+    }
+    auto result = std::make_shared<BillingResult>();
+    result->debugMessage = std::make_shared<FakeJni::JString>("offline: no Play Store");
+    proxy->deliver("com/android/billingclient/api/BillingClientStateListener",
+                   "onBillingSetupFinished",
+                   "(Lcom/android/billingclient/api/BillingResult;)V", result);
 }
 
 bool BillingClient::isReady()
@@ -301,6 +365,8 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::google::android::play::core::review::ReviewM
     { FakeJni::Function<&Task::addOnCompleteListener> {}, "addOnCompleteListener", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Task::addOnSuccessListener> {}, "addOnSuccessListener", FakeJni::JMethodID::PUBLIC },
     { FakeJni::Function<&Task::addOnFailureListener> {}, "addOnFailureListener", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Task::isSuccessful> {}, "isSuccessful", FakeJni::JMethodID::PUBLIC },
+    { FakeJni::Function<&Task::getResult> {}, "getResult", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::google::android::play::core::tasks::OnCompleteListener) { FakeJni::Constructor<OnCompleteListener> {} },
@@ -319,6 +385,7 @@ BEGIN_NATIVE_DESCRIPTOR(jnivm::com::google::android::play::core::review::ReviewM
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::google::android::gms::games::AuthenticationResult) { FakeJni::Constructor<AuthenticationResult> {} },
+    { FakeJni::Function<&AuthenticationResult::isAuthenticated> {}, "isAuthenticated", FakeJni::JMethodID::PUBLIC },
     END_NATIVE_DESCRIPTOR
 
     BEGIN_NATIVE_DESCRIPTOR(jnivm::com::google::android::gms::games::GamesSignInClient) { FakeJni::Constructor<GamesSignInClient> {} },

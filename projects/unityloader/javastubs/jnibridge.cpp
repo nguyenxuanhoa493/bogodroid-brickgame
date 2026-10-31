@@ -66,6 +66,14 @@ void JNIBridgeProxy::run() {
     }
 }
 
+void JNIBridgeProxy::deliver(const char* className, const char* methodName,
+                             const char* methodSig,
+                             std::shared_ptr<jnivm::java::lang::Object> arg) {
+    // Reuses the same dispatch as the typed callbacks above; the branch on
+    // invocationMode inside invoke() selects ProxyInvoker vs GCHandle.
+    invoke(className, methodName, methodSig, arg);
+}
+
 bool JNIBridgeProxy::handleMessage(std::shared_ptr<jnivm::android::os::Message> msg) {
     // Runtime check: does this instance actually implement Handler.Callback?
     if (implementedInterfaces.count("android/os/Handler$Callback")) {

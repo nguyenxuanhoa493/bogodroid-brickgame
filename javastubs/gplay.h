@@ -100,15 +100,24 @@ namespace com {
                         class Task : public FakeJni::JObject {
                         public:
                             DEFINE_CLASS_NAME("com/google/android/play/core/tasks/Task")
-                            Task(std::shared_ptr<FakeJni::JObject> result);
+                            Task(std::shared_ptr<FakeJni::JObject> res = nullptr);
                             std::shared_ptr<FakeJni::JObject> result = nullptr;
-                            std::shared_ptr<OnCompleteListener> onCompleteListener = nullptr;
-                            std::shared_ptr<OnSuccessListener> onSuccessListener = nullptr;
-                            std::shared_ptr<OnFailureListener> onFailureListener = nullptr;
+                            // Unity's Play Games plugin hands in AndroidJavaProxy
+                            // objects typed com.google.android.gms.tasks.*, which
+                            // are not the play-core listener classes above. Keep
+                            // the listeners as plain Objects and forward by name.
+                            std::shared_ptr<FakeJni::JObject> onCompleteListener = nullptr;
+                            std::shared_ptr<FakeJni::JObject> onSuccessListener = nullptr;
+                            std::shared_ptr<FakeJni::JObject> onFailureListener = nullptr;
 
-                            std::shared_ptr<Task> addOnCompleteListener(std::shared_ptr<OnCompleteListener> listener);
-                            std::shared_ptr<Task> addOnSuccessListener(std::shared_ptr<OnSuccessListener> listener);
-                            std::shared_ptr<Task> addOnFailureListener(std::shared_ptr<OnFailureListener> listener);
+                            std::shared_ptr<Task> addOnCompleteListener(std::shared_ptr<FakeJni::JObject> listener);
+                            std::shared_ptr<Task> addOnSuccessListener(std::shared_ptr<FakeJni::JObject> listener);
+                            std::shared_ptr<Task> addOnFailureListener(std::shared_ptr<FakeJni::JObject> listener);
+
+                            // The fake task is always complete; the plugin reads
+                            // these from OnComplete handlers.
+                            bool isSuccessful();
+                            std::shared_ptr<FakeJni::JObject> getResult();
                         };
 
                     }
@@ -130,6 +139,10 @@ namespace com {
                     class AuthenticationResult : public FakeJni::JObject {
                     public:
                         DEFINE_CLASS_NAME("com/google/android/gms/auth/api/signin/AuthenticationResult")
+                        // Offline device: the sign-in task succeeds but the
+                        // player is not authenticated, so the Play Games plugin
+                        // reports "not signed in" and the game proceeds.
+                        bool isAuthenticated();
                     };
 
                     class GamesSignInClient : public FakeJni::JObject {
