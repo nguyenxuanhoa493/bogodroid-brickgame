@@ -2710,16 +2710,18 @@ extern "C" void bd_glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1,
                                filter);
 }
 
-// Debug (BD_DEPTH_ON_INVALIDATE=1): an invalidated depth/stencil buffer is
-// undefined and this Mali hands back zeros, so the LEQUAL fullscreen blit that
-// presents the frame tests against 0 and is rejected almost everywhere. Clear
-// the buffer to its neutral value instead of discarding it, and keep the
-// discard for colour attachments only.
+// Unity invalidates the screen's depth/stencil instead of clearing them. An
+// invalidated buffer is undefined, and this Mali hands back zeros, so the
+// LEQUAL fullscreen blit that presents the frame tests against 0 and is
+// rejected almost everywhere - the panel stays black while the probe shows the
+// frame was rendered. Clearing to the neutral value is spec-legal (the caller
+// said the contents are worthless) and keeps the blit alive. BD_DEPTH_ON_INVALIDATE=0
+// restores the plain discard for comparison.
 static bool bd_depth_on_invalidate_enabled()
 {
     static const bool enabled = [] {
         const char* value = getenv("BD_DEPTH_ON_INVALIDATE");
-        return value && *value && strcmp(value, "0") != 0;
+        return !value || !*value || strcmp(value, "0") != 0;
     }();
     return enabled;
 }
