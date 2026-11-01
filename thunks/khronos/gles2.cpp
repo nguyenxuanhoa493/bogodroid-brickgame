@@ -13,6 +13,7 @@
 #include "gles2_funcs.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <string>
@@ -2419,9 +2420,7 @@ static bool bd_draw_census_enabled()
     return enabled == 1;
 }
 
-// Integer tuning knobs for the census/probe, read once. Booting a game draws
-// hundreds of frames before the scene under study exists, so both need to start
-// counting at a draw index instead of always watching the first frames.
+// Integer tuning knobs for the census/probe and frame trace, read once.
 static int bd_debug_env_int(const char* name, int fallback)
 {
     static std::map<std::string, int> cache;
@@ -2438,6 +2437,116 @@ static int bd_debug_env_int(const char* name, int fallback)
     cache.emplace(name, value);
     return value;
 }
+
+// Debug (BD_FRAME_TRACE=1): log the framebuffer lifecycle of the frames under
+// study — every clear, framebuffer bind, blit and invalidate. A draw whose
+// pixels are visible at draw time but gone by the swap has to be erased by one
+// of these, and guessing which is more expensive than printing them.
+//   BD_FRAME_TRACE_FROM=<swap>   start at this swap index (default 0)
+//   BD_FRAME_TRACE_LINES=<n>     stop after n lines (default 400)
+static int g_bd_swap_index = 0;
+
+extern "C" void bd_frame_trace_swap(int swap_index)
+{
+    g_bd_swap_index = swap_index;
+}
+
+static bool bd_frame_trace_open()
+{
+    static const bool enabled = [] {
+        const char* value = getenv("BD_FRAME_TRACE");
+        return value && *value && strcmp(value, "0") != 0;
+    }();
+    static const int from = bd_debug_env_int("BD_FRAME_TRACE_FROM", 0);
+    static const int limit = bd_debug_env_int("BD_FRAME_TRACE_LINES", 400);
+    static int lines = 0;
+    if (!enabled || g_bd_swap_index < from || lines >= limit)
+        return false;
+    ++lines;
+    return true;
+}
+
+static GLint bd_bound_fbo()
+{
+    GLint fbo = -1;
+    if (glad_glGetIntegerv)
+        glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &fbo);
+    return fbo;
+}
+
+extern "C" void bd_glClear(GLbitfield mask)
+{
+    if (bd_frame_trace_open()) {
+        GLfloat color[4] = {0, 0, 0, 0};
+        if (glad_glGetFloatv)
+            glad_glGetFloatv(0x0C22 /*GL_COLOR_CLEAR_VALUE*/, color);
+        BD_LOG("FB", "swap=%d clear mask=0x%x fbo=%d colour=%.2f,%.2f,%.2f,%.2f",
+               g_bd_swap_index, (unsigned)mask, (int)bd_bound_fbo(), color[0],
+               color[1], color[2], color[3]);
+    }
+    if (glad_glClear)
+        glad_glClear(mask);
+}
+
+extern "C" void bd_glBindFramebuffer(GLenum target, GLuint framebuffer)
+{
+    if (bd_frame_trace_open())
+        BD_LOG("FB", "swap=%d bindFramebuffer target=0x%x fbo=%u (was %d)",
+               g_bd_swap_index, (unsigned)target, (unsigned)framebuffer,
+               (int)bd_bound_fbo());
+    if (glad_glBindFramebuffer)
+        glad_glBindFramebuffer(target, framebuffer);
+}
+
+extern "C" void bd_glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1,
+                                     GLint dx0, GLint dy0, GLint dx1, GLint dy1,
+                                     GLbitfield mask, GLenum filter)
+{
+    if (bd_frame_trace_open())
+        BD_LOG("FB",
+               "swap=%d blit src=[%d %d %d %d] dst=[%d %d %d %d] mask=0x%x "
+               "filter=0x%x draw_fbo=%d read_fbo=%d",
+               g_bd_swap_index, sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1,
+               (unsigned)mask, (unsigned)filter,
+               (int)bd_bound_fbo(), (int)bd_bound_fbo());
+    if (glad_glBlitFramebuffer)
+        glad_glBlitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask,
+                               filter);
+}
+
+extern "C" void bd_glInvalidateFramebuffer(GLenum target, GLsizei count,
+                                           const GLenum* attachments)
+{
+    if (bd_frame_trace_open()) {
+        char list[128] = "";
+        size_t used = 0;
+        for (GLsizei i = 0; i < count && i < 8; i++)
+            used += (size_t)snprintf(list + used, sizeof(list) - used, " 0x%x",
+                                     (unsigned)attachments[i]);
+        BD_LOG("FB", "swap=%d invalidate target=0x%x fbo=%d attachments:%s",
+               g_bd_swap_index, (unsigned)target, (int)bd_bound_fbo(), list);
+    }
+    if (glad_glInvalidateFramebuffer)
+        glad_glInvalidateFramebuffer(target, count, attachments);
+}
+
+extern "C" void bd_glDiscardFramebufferEXT(GLenum target, GLsizei count,
+                                           const GLenum* attachments)
+{
+    if (bd_frame_trace_open()) {
+        char list[128] = "";
+        size_t used = 0;
+        for (GLsizei i = 0; i < count && i < 8; i++)
+            used += (size_t)snprintf(list + used, sizeof(list) - used, " 0x%x",
+                                     (unsigned)attachments[i]);
+        BD_LOG("FB", "swap=%d discard target=0x%x fbo=%d attachments:%s",
+               g_bd_swap_index, (unsigned)target, (int)bd_bound_fbo(), list);
+    }
+    if (glad_glDiscardFramebufferEXT)
+        glad_glDiscardFramebufferEXT(target, count, attachments);
+}
+
+static bool bd_draw_census_enabled()
 
 struct BdDrawStat {
     uint64_t draws = 0;
@@ -4436,6 +4545,14 @@ void load_gles2_funcs()
 	bd_symtable_override("glDrawElements", (uintptr_t)&bd_glDrawElements);
 	bd_symtable_override("glDrawArraysInstanced", (uintptr_t)&bd_glDrawArraysInstanced);
 	bd_symtable_override("glDrawElementsInstanced", (uintptr_t)&bd_glDrawElementsInstanced);
+	// [BD-FB] frame lifecycle trace (BD_FRAME_TRACE), forwarded untouched.
+	bd_symtable_override("glClear", (uintptr_t)&bd_glClear);
+	bd_symtable_override("glBindFramebuffer", (uintptr_t)&bd_glBindFramebuffer);
+	bd_symtable_override("glBlitFramebuffer", (uintptr_t)&bd_glBlitFramebuffer);
+	bd_symtable_override("glInvalidateFramebuffer",
+	                     (uintptr_t)&bd_glInvalidateFramebuffer);
+	bd_symtable_override("glDiscardFramebufferEXT",
+	                     (uintptr_t)&bd_glDiscardFramebufferEXT);
 	bd_symtable_override("glActiveTexture", (uintptr_t)&bd_glActiveTexture);
 	bd_symtable_override("glViewport", (uintptr_t)&bd_glViewport);
 	bd_symtable_override("glTexParameteri", (uintptr_t)&bd_glTexParameteri);
