@@ -2734,6 +2734,27 @@ static bool bd_masked_attachment(GLenum attachment)
            attachment == 0x821A /*GL_DEPTH_STENCIL*/;
 }
 
+// Debug (BD_KEEP_COLOR=1): Unity invalidates the screen's colour attachment
+// right after it blits the composed frame there. On this tiled driver the
+// discard can drop the tiles before the flip, so the panel stays black even
+// though the draw-time probe shows the frame. Drop only the colour attachment
+// and let depth/stencil keep their own handling.
+static GLsizei bd_filter_color_attachments(const GLenum* in, GLsizei count,
+                                           GLenum* out)
+{
+    static const bool keep = [] {
+        const char* value = getenv("BD_KEEP_COLOR");
+        return value && *value && strcmp(value, "0") != 0;
+    }();
+    GLsizei kept = 0;
+    for (GLsizei i = 0; i < count && kept < 16; i++) {
+        if (keep && in[i] == 0x1800 /*GL_COLOR*/)
+            continue;
+        out[kept++] = in[i];
+    }
+    return kept;
+}
+
 static GLbitfield bd_clear_masked_buffers(const GLenum* attachments,
                                           GLsizei count)
 {
@@ -2838,17 +2859,19 @@ extern "C" void bd_glInvalidateFramebuffer(GLenum target, GLsizei count,
         BD_LOG("FB", "swap=%d invalidate target=0x%x fbo=%d attachments:%s",
                g_bd_swap_index, (unsigned)target, (int)bd_bound_fbo(), list);
     }
-    if (bd_no_discard_enabled())
-        return;
+    GLenum kept[16];
+    GLsizei kept_count = bd_filter_color_attachments(attachments, count, kept);
     GLenum rest[16];
     GLsizei rest_count = 0;
-    if (bd_clear_masked_before_discard(attachments, count, rest, &rest_count)) {
-        if (rest_count > 0 && glad_glInvalidateFramebuffer)
-            glad_glInvalidateFramebuffer(target, rest_count, rest);
-        return;
+    if (!bd_clear_masked_before_discard(kept, kept_count, rest, &rest_count)) {
+        for (GLsizei i = 0; i < kept_count; i++)
+            rest[i] = kept[i];
+        rest_count = kept_count;
     }
-    if (glad_glInvalidateFramebuffer)
-        glad_glInvalidateFramebuffer(target, count, attachments);
+    if (bd_no_discard_enabled())
+        return;
+    if (rest_count > 0 && glad_glInvalidateFramebuffer)
+        glad_glInvalidateFramebuffer(target, rest_count, rest);
 }
 
 extern "C" void bd_glInvalidateSubFramebuffer(GLenum target, GLsizei count,
@@ -2887,17 +2910,19 @@ extern "C" void bd_glDiscardFramebufferEXT(GLenum target, GLsizei count,
         BD_LOG("FB", "swap=%d discard target=0x%x fbo=%d attachments:%s",
                g_bd_swap_index, (unsigned)target, (int)bd_bound_fbo(), list);
     }
-    if (bd_no_discard_enabled())
-        return;
+    GLenum kept[16];
+    GLsizei kept_count = bd_filter_color_attachments(attachments, count, kept);
     GLenum rest[16];
     GLsizei rest_count = 0;
-    if (bd_clear_masked_before_discard(attachments, count, rest, &rest_count)) {
-        if (rest_count > 0 && glad_glDiscardFramebufferEXT)
-            glad_glDiscardFramebufferEXT(target, rest_count, rest);
-        return;
+    if (!bd_clear_masked_before_discard(kept, kept_count, rest, &rest_count)) {
+        for (GLsizei i = 0; i < kept_count; i++)
+            rest[i] = kept[i];
+        rest_count = kept_count;
     }
-    if (glad_glDiscardFramebufferEXT)
-        glad_glDiscardFramebufferEXT(target, count, attachments);
+    if (bd_no_discard_enabled())
+        return;
+    if (rest_count > 0 && glad_glDiscardFramebufferEXT)
+        glad_glDiscardFramebufferEXT(target, rest_count, rest);
 }
 
 struct BdDrawStat {
