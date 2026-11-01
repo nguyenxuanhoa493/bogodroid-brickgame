@@ -2901,10 +2901,17 @@ static bool bd_probe_begin(GLsizei count)
     // (thousands of indices) would burn the whole probe budget.
     static const int limit = bd_debug_env_int("BD_PROBE_COUNT", 4);
     static const int from = bd_debug_env_int("BD_PROBE_FROM", 0);
+    static const int only_fbo = bd_debug_env_int("BD_PROBE_FBO", -1);
     if (!enabled || g_probe.done >= limit || g_draw_total < (uint64_t)from ||
         count <= 0 || count > 1024 || !glad_glReadPixels ||
         !glad_glGetIntegerv || !glad_glClear || !glad_glClearColor)
         return false;
+    if (only_fbo >= 0) {
+        GLint fbo = 0;
+        glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &fbo);
+        if (fbo != only_fbo)
+            return false;
+    }
     GLint viewport[4] = {0, 0, 0, 0};
     glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &g_probe.fbo);
     glad_glGetIntegerv(0x8B8D /*GL_CURRENT_PROGRAM*/, &g_probe.program);
