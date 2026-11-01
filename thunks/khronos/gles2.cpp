@@ -2604,6 +2604,122 @@ extern "C" void bd_glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1,
                                filter);
 }
 
+// Debug (BD_DEPTH_ON_INVALIDATE=1): an invalidated depth/stencil buffer is
+// undefined and this Mali hands back zeros, so the LEQUAL fullscreen blit that
+// presents the frame tests against 0 and is rejected almost everywhere. Clear
+// the buffer to its neutral value instead of discarding it, and keep the
+// discard for colour attachments only.
+static bool bd_depth_on_invalidate_enabled()
+{
+    static const bool enabled = [] {
+        const char* value = getenv("BD_DEPTH_ON_INVALIDATE");
+        return value && *value && strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+static bool bd_masked_attachment(GLenum attachment)
+{
+    return attachment == 0x1801 /*GL_DEPTH_EXT*/ ||
+           attachment == 0x1802 /*GL_STENCIL_EXT*/ ||
+           attachment == 0x8D00 /*GL_DEPTH_ATTACHMENT*/ ||
+           attachment == 0x8D20 /*GL_STENCIL_ATTACHMENT*/ ||
+           attachment == 0x8D21 /*GL_DEPTH_STENCIL_ATTACHMENT*/ ||
+           attachment == 0x821A /*GL_DEPTH_STENCIL*/;
+}
+
+static GLbitfield bd_clear_masked_buffers(const GLenum* attachments,
+                                          GLsizei count)
+{
+    GLbitfield mask = 0;
+    for (GLsizei i = 0; i < count; i++) {
+        const GLenum a = attachments[i];
+        if (a == 0x1801 || a == 0x8D00 || a == 0x8D21 || a == 0x821A)
+            mask |= 0x00000100 /*GL_DEPTH_BUFFER_BIT*/;
+        if (a == 0x1802 || a == 0x8D20 || a == 0x8D21 || a == 0x821A)
+            mask |= 0x00000400 /*GL_STENCIL_BUFFER_BIT*/;
+    }
+    if (!mask || !glad_glClear)
+        return 0;
+
+    GLboolean depth_mask = GL_TRUE;
+    GLint stencil_mask_front = 0xFF;
+    GLint stencil_mask_back = 0xFF;
+    if (glad_glGetBooleanv)
+        glad_glGetBooleanv(0x0B72 /*GL_DEPTH_WRITEMASK*/, &depth_mask);
+    if (glad_glGetIntegerv) {
+        glad_glGetIntegerv(0x0B97 /*GL_STENCIL_WRITEMASK*/, &stencil_mask_front);
+        glad_glGetIntegerv(0x0B98 /*GL_STENCIL_BACK_WRITEMASK*/,
+                           &stencil_mask_back);
+    }
+    const GLboolean depth_test =
+        glad_glIsEnabled ? glad_glIsEnabled(0x0B71 /*GL_DEPTH_TEST*/) : GL_FALSE;
+    const GLboolean stencil_test =
+        glad_glIsEnabled ? glad_glIsEnabled(0x0B90 /*GL_STENCIL_TEST*/) : GL_FALSE;
+    const GLboolean scissor =
+        glad_glIsEnabled ? glad_glIsEnabled(0x0C11 /*GL_SCISSOR_TEST*/) : GL_FALSE;
+    const GLboolean color_mask[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+    GLboolean previous_color_mask[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+    if (glad_glGetBooleanv)
+        glad_glGetBooleanv(0x0C23 /*GL_COLOR_WRITEMASK*/, previous_color_mask);
+
+    if (depth_test)
+        glad_glDisable(0x0B71);
+    if (stencil_test)
+        glad_glDisable(0x0B90);
+    if (scissor)
+        glad_glDisable(0x0C11);
+    if (glad_glColorMask)
+        glad_glColorMask(color_mask[0], color_mask[1], color_mask[2],
+                         color_mask[3]);
+    if (glad_glDepthMask)
+        glad_glDepthMask(GL_TRUE);
+    if (glad_glStencilMaskSeparate) {
+        glad_glStencilMaskSeparate(0x0404 /*GL_FRONT*/, 0xFF);
+        glad_glStencilMaskSeparate(0x0405 /*GL_BACK*/, 0xFF);
+    } else if (glad_glStencilMask) {
+        glad_glStencilMask(0xFF);
+    }
+
+    glad_glClear(mask);
+
+    if (glad_glDepthMask)
+        glad_glDepthMask(depth_mask);
+    if (glad_glStencilMaskSeparate) {
+        glad_glStencilMaskSeparate(0x0404, (GLuint)stencil_mask_front);
+        glad_glStencilMaskSeparate(0x0405, (GLuint)stencil_mask_back);
+    } else if (glad_glStencilMask) {
+        glad_glStencilMask((GLuint)stencil_mask_front);
+    }
+    if (glad_glColorMask)
+        glad_glColorMask(previous_color_mask[0], previous_color_mask[1],
+                         previous_color_mask[2], previous_color_mask[3]);
+    if (scissor)
+        glad_glEnable(0x0C11);
+    if (stencil_test)
+        glad_glEnable(0x0B90);
+    if (depth_test)
+        glad_glEnable(0x0B71);
+    return mask;
+}
+
+// Called before the real invalidate/discard: returns true when the masked
+// buffers were cleared and only `rest` may be passed on to the driver.
+static bool bd_clear_masked_before_discard(const GLenum* attachments,
+                                           GLsizei count, GLenum* rest,
+                                           GLsizei* rest_count)
+{
+    if (!bd_depth_on_invalidate_enabled() || count <= 0 || count > 16 ||
+        !bd_clear_masked_buffers(attachments, count))
+        return false;
+    *rest_count = 0;
+    for (GLsizei i = 0; i < count; i++) {
+        if (!bd_masked_attachment(attachments[i]))
+            rest[(*rest_count)++] = attachments[i];
+    }
+    return true;
+}
+
 extern "C" void bd_glInvalidateFramebuffer(GLenum target, GLsizei count,
                                            const GLenum* attachments)
 {
@@ -2618,6 +2734,13 @@ extern "C" void bd_glInvalidateFramebuffer(GLenum target, GLsizei count,
     }
     if (bd_no_discard_enabled())
         return;
+    GLenum rest[16];
+    GLsizei rest_count = 0;
+    if (bd_clear_masked_before_discard(attachments, count, rest, &rest_count)) {
+        if (rest_count > 0 && glad_glInvalidateFramebuffer)
+            glad_glInvalidateFramebuffer(target, rest_count, rest);
+        return;
+    }
     if (glad_glInvalidateFramebuffer)
         glad_glInvalidateFramebuffer(target, count, attachments);
 }
@@ -2660,6 +2783,13 @@ extern "C" void bd_glDiscardFramebufferEXT(GLenum target, GLsizei count,
     }
     if (bd_no_discard_enabled())
         return;
+    GLenum rest[16];
+    GLsizei rest_count = 0;
+    if (bd_clear_masked_before_discard(attachments, count, rest, &rest_count)) {
+        if (rest_count > 0 && glad_glDiscardFramebufferEXT)
+            glad_glDiscardFramebufferEXT(target, rest_count, rest);
+        return;
+    }
     if (glad_glDiscardFramebufferEXT)
         glad_glDiscardFramebufferEXT(target, count, attachments);
 }
