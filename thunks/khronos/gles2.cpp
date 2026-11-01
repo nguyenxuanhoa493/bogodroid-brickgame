@@ -1378,6 +1378,47 @@ extern "C" void bd_glGetProgramBinary(GLuint program, GLsizei bufSize,
                binaryFormat ? (unsigned)*binaryFormat : 0u);
 }
 
+// Debug (BD_DUMP_SHADERS=<dir>): write the source of every linked program, so
+// a suspect draw's shader can be read instead of guessed at.
+static void bd_dump_program_shaders(GLuint program)
+{
+    static const char* dir = getenv("BD_DUMP_SHADERS");
+    static const char* limit_env = getenv("BD_DUMP_SHADERS_LIMIT");
+    static const int limit = limit_env && *limit_env ? atoi(limit_env) : 64;
+    static int dumped = 0;
+    if (!dir || !*dir || dumped >= limit || !glad_glGetShaderiv ||
+        !glad_glGetShaderSource || !glad_glGetAttachedShaders)
+        return;
+    GLuint shaders[8] = {0};
+    GLsizei count = 0;
+    glad_glGetAttachedShaders(program, 8, &count, shaders);
+    for (GLsizei i = 0; i < count; ++i) {
+        GLint type = 0, len = 0;
+        glad_glGetShaderiv(shaders[i], GL_SHADER_TYPE, &type);
+        glad_glGetShaderiv(shaders[i], GL_SHADER_SOURCE_LENGTH, &len);
+        if (len <= 1)
+            continue;
+        std::string source((size_t)len, '\0');
+        GLsizei written = 0;
+        glad_glGetShaderSource(shaders[i], len, &written, &source[0]);
+        source.resize((size_t)(written > 0 ? written : 0));
+        const char* ext = type == GL_VERTEX_SHADER     ? "vert"
+                          : type == GL_FRAGMENT_SHADER ? "frag"
+                                                       : "other";
+        char path[512];
+        snprintf(path, sizeof(path), "%s/program%u.%s", dir,
+                 (unsigned)program, ext);
+        FILE* file = fopen(path, "wb");
+        if (file) {
+            fwrite(source.data(), 1, source.size(), file);
+            fclose(file);
+        }
+    }
+    ++dumped;
+    BD_LOG("VIDEO", "dumped shaders for program %u (%d attached)",
+           (unsigned)program, (int)count);
+}
+
 extern "C" void bd_glLinkProgram(GLuint program)
 {
     if (!glad_glLinkProgram) {
@@ -1386,6 +1427,7 @@ extern "C" void bd_glLinkProgram(GLuint program)
     }
     const bool video_program = bd_program_uses_rewritten_shader(program);
     glad_glLinkProgram(program);
+    bd_dump_program_shaders(program);
     static uint64_t links = 0;
     const bool log_this = video_program || ++links <= 40;
     if (!log_this)
