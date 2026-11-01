@@ -2419,6 +2419,26 @@ static bool bd_draw_census_enabled()
     return enabled == 1;
 }
 
+// Integer tuning knobs for the census/probe, read once. Booting a game draws
+// hundreds of frames before the scene under study exists, so both need to start
+// counting at a draw index instead of always watching the first frames.
+static int bd_debug_env_int(const char* name, int fallback)
+{
+    static std::map<std::string, int> cache;
+    auto it = cache.find(name);
+    if (it != cache.end())
+        return it->second;
+    int value = fallback;
+    const char* raw = getenv(name);
+    if (raw && *raw) {
+        const long parsed = strtol(raw, nullptr, 10);
+        if (parsed >= 0)
+            value = (int)parsed;
+    }
+    cache.emplace(name, value);
+    return value;
+}
+
 struct BdDrawStat {
     uint64_t draws = 0;
     uint64_t verts = 0;
@@ -2507,18 +2527,28 @@ static void bd_census_dump_fbo(GLuint fbo, const char* prefix, int swap_index)
 // target" without instrumenting inside Unity.
 static void bd_census_detail(GLuint program, GLuint fbo, GLsizei count)
 {
-    static int logged = 0;
-    if (logged > 30)
-        return;
-    ++logged;
+    static const int cap = bd_debug_env_int("BD_CENSUS_DETAILS", 30);
+    static const int from = bd_debug_env_int("BD_CENSUS_DETAIL_FROM", 0);
+    static const bool verbose = [] {
+        const char* value = getenv("BD_CENSUS_VERTS");
+        return value && *value && strcmp(value, "0") != 0;
+    }();
     GLint tex = 0;
     GLint tex_w = 0;
     GLint tex_h = 0;
     GLint tex_fmt = 0;
     if (glad_glGetIntegerv)
         glad_glGetIntegerv(0x8069 /*GL_TEXTURE_BINDING_2D*/, &tex);
+    // Keep collecting textures past the line budget: the swap dump reads them
+    // back, and a draw sampled at boot must not be the only one inspected.
     if (tex > 0 && g_census_textures.size() < 16)
         g_census_textures.insert((GLuint)tex);
+    if (g_draw_total < (uint64_t)from)
+        return;
+    static int logged = 0;
+    if (logged >= cap)
+        return;
+    ++logged;
     if (tex > 0 && glad_glGetTexLevelParameteriv) {
         glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0, 0x1000, &tex_w);
         glad_glGetTexLevelParameteriv(BD_GL_TEXTURE_2D, 0, 0x1001, &tex_h);
@@ -2589,7 +2619,10 @@ static void bd_census_detail(GLuint program, GLuint fbo, GLsizei count)
         BD_LOG("CENSUS", "  _Color = %.3f %.3f %.3f %.3f", color[0], color[1],
                color[2], color[3]);
     if (glad_glGetUniformLocation && glad_glGetUniformfv) {
-        const char* names[] = {"unity_MatrixVP", "unity_ObjectToWorld", "matrix"};
+        const char* names[] = {"hlslcc_mtx4x4unity_MatrixVP[0]",
+                               "unity_MatrixVP",
+                               "hlslcc_mtx4x4unity_ObjectToWorld[0]",
+                               "unity_ObjectToWorld", "matrix"};
         for (const char* name : names) {
             GLint loc = glad_glGetUniformLocation(program, name);
             if (loc < 0)
@@ -2607,6 +2640,13 @@ static void bd_census_detail(GLuint program, GLuint fbo, GLsizei count)
     if (logged <= 6)
         for (GLint i = 0; i < 4; i++)
             bd_dump_attribute_bounds(i, count);
+    // Full program state for the sampled draws: a quad that is off screen is
+    // told apart from one that paints black by its matrix and vertices.
+    if (verbose) {
+        bd_dump_program((GLint)program);
+        for (GLint i = 0; i < 4; i++)
+            bd_dump_attribute(i);
+    }
 }
 
 // Debug (BD_CENSUS_PROBE=1): fill the draw target with magenta, run the draw,
@@ -2634,9 +2674,11 @@ static bool bd_probe_begin(GLsizei count)
     }
     // Only the small UI draws are interesting; the startup batched geometry
     // (thousands of indices) would burn the whole probe budget.
-    if (!enabled || g_probe.done >= 4 || count <= 0 || count > 1024 ||
-        !glad_glReadPixels || !glad_glGetIntegerv || !glad_glClear ||
-        !glad_glClearColor)
+    static const int limit = bd_debug_env_int("BD_PROBE_COUNT", 4);
+    static const int from = bd_debug_env_int("BD_PROBE_FROM", 0);
+    if (!enabled || g_probe.done >= limit || g_draw_total < (uint64_t)from ||
+        count <= 0 || count > 1024 || !glad_glReadPixels ||
+        !glad_glGetIntegerv || !glad_glClear || !glad_glClearColor)
         return false;
     GLint viewport[4] = {0, 0, 0, 0};
     glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &g_probe.fbo);
