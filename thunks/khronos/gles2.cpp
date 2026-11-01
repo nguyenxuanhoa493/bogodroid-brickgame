@@ -2546,8 +2546,6 @@ extern "C" void bd_glDiscardFramebufferEXT(GLenum target, GLsizei count,
         glad_glDiscardFramebufferEXT(target, count, attachments);
 }
 
-static bool bd_draw_census_enabled()
-
 struct BdDrawStat {
     uint64_t draws = 0;
     uint64_t verts = 0;
