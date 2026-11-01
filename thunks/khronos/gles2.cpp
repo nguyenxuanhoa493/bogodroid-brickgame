@@ -2474,6 +2474,19 @@ static GLint bd_bound_fbo()
     return fbo;
 }
 
+// Debug (BD_NO_DISCARD=1): swallow the invalidate/discard calls. Unity ends a
+// frame by discarding COLOR, and on this tiled Mali that can throw away the
+// tiles it just rendered before they are flipped - the readback says black
+// while the draw-time probe says the pixels were there.
+static bool bd_no_discard_enabled()
+{
+    static const bool enabled = [] {
+        const char* value = getenv("BD_NO_DISCARD");
+        return value && *value && strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
 extern "C" void bd_glClear(GLbitfield mask)
 {
     if (bd_frame_trace_open()) {
@@ -2502,13 +2515,19 @@ extern "C" void bd_glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1,
                                      GLint dx0, GLint dy0, GLint dx1, GLint dy1,
                                      GLbitfield mask, GLenum filter)
 {
-    if (bd_frame_trace_open())
+    if (bd_frame_trace_open()) {
+        GLint draw_fbo = -1;
+        GLint read_fbo = -1;
+        if (glad_glGetIntegerv) {
+            glad_glGetIntegerv(0x8CA6 /*GL_DRAW_FRAMEBUFFER_BINDING*/, &draw_fbo);
+            glad_glGetIntegerv(0x8CAA /*GL_READ_FRAMEBUFFER_BINDING*/, &read_fbo);
+        }
         BD_LOG("FB",
                "swap=%d blit src=[%d %d %d %d] dst=[%d %d %d %d] mask=0x%x "
                "filter=0x%x draw_fbo=%d read_fbo=%d",
                g_bd_swap_index, sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1,
-               (unsigned)mask, (unsigned)filter,
-               (int)bd_bound_fbo(), (int)bd_bound_fbo());
+               (unsigned)mask, (unsigned)filter, (int)draw_fbo, (int)read_fbo);
+    }
     if (glad_glBlitFramebuffer)
         glad_glBlitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask,
                                filter);
@@ -2526,8 +2545,34 @@ extern "C" void bd_glInvalidateFramebuffer(GLenum target, GLsizei count,
         BD_LOG("FB", "swap=%d invalidate target=0x%x fbo=%d attachments:%s",
                g_bd_swap_index, (unsigned)target, (int)bd_bound_fbo(), list);
     }
+    if (bd_no_discard_enabled())
+        return;
     if (glad_glInvalidateFramebuffer)
         glad_glInvalidateFramebuffer(target, count, attachments);
+}
+
+extern "C" void bd_glInvalidateSubFramebuffer(GLenum target, GLsizei count,
+                                              const GLenum* attachments,
+                                              GLint x, GLint y, GLsizei width,
+                                              GLsizei height)
+{
+    if (bd_frame_trace_open()) {
+        char list[128] = "";
+        size_t used = 0;
+        for (GLsizei i = 0; i < count && i < 8; i++)
+            used += (size_t)snprintf(list + used, sizeof(list) - used, " 0x%x",
+                                     (unsigned)attachments[i]);
+        BD_LOG("FB",
+               "swap=%d invalidateSub target=0x%x fbo=%d rect=[%d %d %d %d] "
+               "attachments:%s",
+               g_bd_swap_index, (unsigned)target, (int)bd_bound_fbo(), x, y,
+               width, height, list);
+    }
+    if (bd_no_discard_enabled())
+        return;
+    if (glad_glInvalidateSubFramebuffer)
+        glad_glInvalidateSubFramebuffer(target, count, attachments, x, y, width,
+                                        height);
 }
 
 extern "C" void bd_glDiscardFramebufferEXT(GLenum target, GLsizei count,
@@ -2542,6 +2587,8 @@ extern "C" void bd_glDiscardFramebufferEXT(GLenum target, GLsizei count,
         BD_LOG("FB", "swap=%d discard target=0x%x fbo=%d attachments:%s",
                g_bd_swap_index, (unsigned)target, (int)bd_bound_fbo(), list);
     }
+    if (bd_no_discard_enabled())
+        return;
     if (glad_glDiscardFramebufferEXT)
         glad_glDiscardFramebufferEXT(target, count, attachments);
 }
@@ -3271,8 +3318,25 @@ extern "C" void bd_glDeleteTextures(GLsizei n, const GLuint* textures)
     if (glad_glDeleteTextures) glad_glDeleteTextures(n, textures);
 }
 
+extern "C" void bd_glScissor(GLint x, GLint y, GLsizei width, GLsizei height)
+{
+    if (bd_frame_trace_open()) {
+        GLboolean enabled = 0;
+        if (glad_glIsEnabled)
+            enabled = glad_glIsEnabled(0x0C11 /*GL_SCISSOR_TEST*/);
+        BD_LOG("FB", "swap=%d scissor [%d %d %d %d] test=%d fbo=%d",
+               g_bd_swap_index, x, y, width, height, (int)enabled,
+               (int)bd_bound_fbo());
+    }
+    if (glad_glScissor)
+        glad_glScissor(x, y, width, height);
+}
+
 extern "C" void bd_glViewport(GLint x, GLint y, GLsizei width, GLsizei height)
 {
+    if (bd_frame_trace_open())
+        BD_LOG("FB", "swap=%d viewport [%d %d %d %d] fbo=%d",
+               g_bd_swap_index, x, y, width, height, (int)bd_bound_fbo());
     // The video blit legitimately runs in a 1280x720 viewport (Unity's video
     // RenderTexture is the clip's size), so a wrong viewport there is normal.
     // What cannot be normal is the DEFAULT framebuffer being set up for anything
@@ -4549,10 +4613,13 @@ void load_gles2_funcs()
 	bd_symtable_override("glBlitFramebuffer", (uintptr_t)&bd_glBlitFramebuffer);
 	bd_symtable_override("glInvalidateFramebuffer",
 	                     (uintptr_t)&bd_glInvalidateFramebuffer);
+	bd_symtable_override("glInvalidateSubFramebuffer",
+	                     (uintptr_t)&bd_glInvalidateSubFramebuffer);
 	bd_symtable_override("glDiscardFramebufferEXT",
 	                     (uintptr_t)&bd_glDiscardFramebufferEXT);
 	bd_symtable_override("glActiveTexture", (uintptr_t)&bd_glActiveTexture);
 	bd_symtable_override("glViewport", (uintptr_t)&bd_glViewport);
+	bd_symtable_override("glScissor", (uintptr_t)&bd_glScissor);
 	bd_symtable_override("glTexParameteri", (uintptr_t)&bd_glTexParameteri);
 	bd_symtable_override("glTexParameterf", (uintptr_t)&bd_glTexParameterf);
 	bd_symtable_override("glTexImage2D", (uintptr_t)&bd_glTexImage2D);
