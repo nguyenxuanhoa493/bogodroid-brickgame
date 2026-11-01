@@ -509,9 +509,24 @@ static void bd_dump_frame_if_requested()
     SDL_GL_GetDrawableSize(sdl_win, &gl_width, &gl_height);
     if (gl_width > 0 && gl_height > 0 && glad_glReadPixels) {
         std::vector<uint8_t> pixels(static_cast<size_t>(gl_width) * gl_height * 3u);
+        // A pixel-pack buffer left bound by the guest would redirect the
+        // readback into GPU memory and leave this buffer zeroed.
+        GLint pack_buffer = 0;
+        GLint read_buffer = 0;
+        if (glad_glGetIntegerv) {
+            glad_glGetIntegerv(0x88ED /*GL_PIXEL_PACK_BUFFER_BINDING*/,
+                               &pack_buffer);
+            glad_glGetIntegerv(0x0C02 /*GL_READ_BUFFER*/, &read_buffer);
+        }
+        if (pack_buffer && glad_glBindBuffer)
+            glad_glBindBuffer(0x88EC /*GL_PIXEL_PACK_BUFFER*/, 0);
         glad_glFinish();
         glad_glReadPixels(0, 0, gl_width, gl_height, GL_RGB, GL_UNSIGNED_BYTE,
                           pixels.data());
+        if (pack_buffer && glad_glBindBuffer)
+            glad_glBindBuffer(0x88EC /*GL_PIXEL_PACK_BUFFER*/, pack_buffer);
+        BD_LOG("DUMP", "gl read state pack=%d read_buffer=0x%x", (int)pack_buffer,
+               (unsigned)read_buffer);
         char path[512];
         snprintf(path, sizeof(path), "%s.%d.gl.ppm", prefix, swap_index);
         FILE* file = fopen(path, "wb");

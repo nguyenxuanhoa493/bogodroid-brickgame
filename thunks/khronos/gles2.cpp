@@ -3162,10 +3162,15 @@ static bool bd_probe_begin(GLsizei count)
     // (thousands of indices) would burn the whole probe budget.
     static const int limit = bd_debug_env_int("BD_PROBE_COUNT", 4);
     static const int from = bd_debug_env_int("BD_PROBE_FROM", 0);
+    static const int every = bd_debug_env_int("BD_PROBE_EVERY", 1);
     static const int only_fbo = bd_debug_env_int("BD_PROBE_FBO", -1);
     if (!enabled || g_probe.done >= limit || g_draw_total < (uint64_t)from ||
         count <= 0 || count > 1024 || !glad_glReadPixels ||
         !glad_glGetIntegerv || !glad_glClear || !glad_glClearColor)
+        return false;
+    // BD_PROBE_EVERY spreads a handful of probes over a long run, so the
+    // captured frames form a timeline instead of all landing in the first frame.
+    if (every > 1 && (g_draw_total % (uint64_t)every) != 0)
         return false;
     if (only_fbo >= 0) {
         GLint fbo = 0;
