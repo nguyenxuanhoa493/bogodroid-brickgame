@@ -3145,6 +3145,7 @@ struct BdProbe {
     int width = 0;
     int height = 0;
     int done = 0;
+    int candidates = 0;
     bool scissor = false;
     GLfloat clear[4] = {0, 0, 0, 1};
 };
@@ -3170,14 +3171,14 @@ static bool bd_probe_begin(GLsizei count)
         return false;
     // BD_PROBE_EVERY spreads a handful of probes over a long run, so the
     // captured frames form a timeline instead of all landing in the first frame.
-    if (every > 1 && (g_draw_total % (uint64_t)every) != 0)
-        return false;
     if (only_fbo >= 0) {
         GLint fbo = 0;
         glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &fbo);
         if (fbo != only_fbo)
             return false;
     }
+    if (every > 1 && (g_probe.candidates++ % every) != 0)
+        return false;
     GLint viewport[4] = {0, 0, 0, 0};
     glad_glGetIntegerv(0x8CA6 /*GL_FRAMEBUFFER_BINDING*/, &g_probe.fbo);
     glad_glGetIntegerv(0x8B8D /*GL_CURRENT_PROGRAM*/, &g_probe.program);
