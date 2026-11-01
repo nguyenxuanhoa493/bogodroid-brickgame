@@ -2484,8 +2484,9 @@ static void bd_trace_draw(const char* what, GLsizei count)
         return value && *value && strcmp(value, "0") != 0;
     }();
     static const int limit = bd_debug_env_int("BD_FRAME_TRACE_DRAW_LINES", 800);
+    static const int from = bd_debug_env_int("BD_FRAME_TRACE_FROM", 0);
     static int lines = 0;
-    if (!enabled || lines >= limit)
+    if (!enabled || lines >= limit || g_bd_swap_index < from)
         return;
     ++lines;
     GLint fbo = -1;
@@ -2500,6 +2501,49 @@ static void bd_trace_draw(const char* what, GLsizei count)
            g_bd_swap_index, what, (int)count, (int)program, (int)fbo, viewport[0],
            viewport[1], viewport[2], viewport[3]);
 }
+
+// Debug (BD_SCREEN_NO_DEPTH=1): draws into the default framebuffer run with
+// depth and stencil testing off. Unity blits the composed frame to the screen
+// as one fullscreen triangle; if the window surface has a depth/stencil buffer
+// whose contents are undefined (Unity invalidates it but never clears it), that
+// blit is rejected almost everywhere and the panel stays black.
+static bool bd_screen_no_depth_enabled()
+{
+    static const bool enabled = [] {
+        const char* value = getenv("BD_SCREEN_NO_DEPTH");
+        return value && *value && strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+struct BdScreenDepthRelax {
+    bool applied = false;
+    GLboolean depth = 1;
+    GLboolean stencil = 0;
+
+    explicit BdScreenDepthRelax(GLint fbo)
+    {
+        if (!bd_screen_no_depth_enabled() || fbo != 0 || !glad_glIsEnabled)
+            return;
+        depth = glad_glIsEnabled(0x0B71 /*GL_DEPTH_TEST*/);
+        stencil = glad_glIsEnabled(0x0B90 /*GL_STENCIL_TEST*/);
+        if (depth)
+            glad_glDisable(0x0B71);
+        if (stencil)
+            glad_glDisable(0x0B90);
+        applied = true;
+    }
+
+    ~BdScreenDepthRelax()
+    {
+        if (!applied)
+            return;
+        if (depth)
+            glad_glEnable(0x0B71);
+        if (stencil)
+            glad_glEnable(0x0B90);
+    }
+};
 
 // Debug (BD_NO_DISCARD=1): swallow the invalidate/discard calls. Unity ends a
 // frame by discarding COLOR, and on this tiled Mali that can throw away the
@@ -3074,6 +3118,7 @@ extern "C" void bd_glDrawArrays(GLenum mode, GLint first, GLsizei count)
         bd_quad_summary("drawArrays", mode, count, 0, nullptr);
     }
     video_draw_guard([&] {
+        const BdScreenDepthRelax relax(bd_bound_fbo());
         if (glad_glDrawArrays)
             glad_glDrawArrays(mode, first, count);
     });
@@ -3094,6 +3139,7 @@ extern "C" void bd_glDrawElements(GLenum mode, GLsizei count, GLenum type,
         bd_quad_summary("drawElements", mode, count, type, indices);
     }
     video_draw_guard([&] {
+        const BdScreenDepthRelax relax(bd_bound_fbo());
         if (glad_glDrawElements)
             glad_glDrawElements(mode, count, type, indices);
     });
@@ -3113,6 +3159,7 @@ extern "C" void bd_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count
     else
         bd_quad_summary("drawArraysInstanced", mode, count, 0, nullptr);
     video_draw_guard([&] {
+        const BdScreenDepthRelax relax(bd_bound_fbo());
         if (glad_glDrawArraysInstanced)
             glad_glDrawArraysInstanced(mode, first, count, instances);
     });
@@ -3132,6 +3179,7 @@ extern "C" void bd_glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum ty
     else
         bd_quad_summary("drawElementsInstanced", mode, count, type, indices);
     video_draw_guard([&] {
+        const BdScreenDepthRelax relax(bd_bound_fbo());
         if (glad_glDrawElementsInstanced)
             glad_glDrawElementsInstanced(mode, count, type, indices, instances);
     });
