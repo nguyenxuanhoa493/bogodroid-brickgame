@@ -2474,6 +2474,33 @@ static GLint bd_bound_fbo()
     return fbo;
 }
 
+// Debug (BD_FRAME_TRACE_DRAWS=1): put the draw calls on the same timeline as
+// the clears/binds/invalidates, so "which draw reaches the screen, and in what
+// order" is read off one log instead of inferred.
+static void bd_trace_draw(const char* what, GLsizei count)
+{
+    static const bool enabled = [] {
+        const char* value = getenv("BD_FRAME_TRACE_DRAWS");
+        return value && *value && strcmp(value, "0") != 0;
+    }();
+    static const int limit = bd_debug_env_int("BD_FRAME_TRACE_DRAW_LINES", 800);
+    static int lines = 0;
+    if (!enabled || lines >= limit)
+        return;
+    ++lines;
+    GLint fbo = -1;
+    GLint program = 0;
+    GLint viewport[4] = {0, 0, 0, 0};
+    if (glad_glGetIntegerv) {
+        glad_glGetIntegerv(0x8CA6 /*GL_DRAW_FRAMEBUFFER_BINDING*/, &fbo);
+        glad_glGetIntegerv(0x8B8D /*GL_CURRENT_PROGRAM*/, &program);
+        glad_glGetIntegerv(0x0BA2 /*GL_VIEWPORT*/, viewport);
+    }
+    BD_LOG("FB", "swap=%d draw %s count=%d program=%d fbo=%d vp=[%d %d %d %d]",
+           g_bd_swap_index, what, (int)count, (int)program, (int)fbo, viewport[0],
+           viewport[1], viewport[2], viewport[3]);
+}
+
 // Debug (BD_NO_DISCARD=1): swallow the invalidate/discard calls. Unity ends a
 // frame by discarding COLOR, and on this tiled Mali that can throw away the
 // tiles it just rendered before they are flipped - the readback says black
@@ -2887,6 +2914,24 @@ static void bd_probe_end(const char* what, GLsizei count)
            (unsigned long long)(covered ? sr / covered : 0),
            (unsigned long long)(covered ? sg / covered : 0),
            (unsigned long long)(covered ? sb / covered : 0), (unsigned)read_error);
+    // BD_PROBE_DUMP=<prefix>: keep the sampled target, so a partial "covered"
+    // count can be read as a location instead of a number.
+    const char* dump_prefix = getenv("BD_PROBE_DUMP");
+    if (dump_prefix && *dump_prefix) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s.probe%d.ppm", dump_prefix, g_probe.done);
+        FILE* file = fopen(path, "wb");
+        if (file) {
+            fprintf(file, "P6\n%d %d\n255\n", g_probe.width, g_probe.height);
+            for (int y = g_probe.height - 1; y >= 0; --y) {
+                const uint8_t* row = pixels.data() + (size_t)y * g_probe.width * 4u;
+                for (int x = 0; x < g_probe.width; ++x)
+                    fwrite(row + (size_t)x * 4u, 1, 3, file);
+            }
+            fclose(file);
+            BD_LOG("CENSUS", "probe image -> %s", path);
+        }
+    }
     glad_glClearColor(g_probe.clear[0], g_probe.clear[1], g_probe.clear[2],
                       g_probe.clear[3]);
     if (g_probe.scissor)
@@ -3019,6 +3064,7 @@ static void video_draw_guard(DrawFn&& draw)
 
 extern "C" void bd_glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
+    bd_trace_draw("drawArrays", count);
     const bool probe = bd_probe_begin(count);
     bd_census_draw(count, 0);
     if (g_video_program_active)
@@ -3038,6 +3084,7 @@ extern "C" void bd_glDrawArrays(GLenum mode, GLint first, GLsizei count)
 extern "C" void bd_glDrawElements(GLenum mode, GLsizei count, GLenum type,
                                    const void* indices)
 {
+    bd_trace_draw("drawElements", count);
     const bool probe = bd_probe_begin(count);
     bd_census_draw(count, 0);
     if (g_video_program_active)
@@ -3057,6 +3104,7 @@ extern "C" void bd_glDrawElements(GLenum mode, GLsizei count, GLenum type,
 extern "C" void bd_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count,
                                          GLsizei instances)
 {
+    bd_trace_draw("drawArraysInstanced", count);
     const bool probe = bd_probe_begin(count);
     bd_census_draw(count, instances);
     if (g_video_program_active)
@@ -3075,6 +3123,7 @@ extern "C" void bd_glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count
 extern "C" void bd_glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
                                            const void* indices, GLsizei instances)
 {
+    bd_trace_draw("drawElementsInstanced", count);
     const bool probe = bd_probe_begin(count);
     bd_census_draw(count, instances);
     if (g_video_program_active)
