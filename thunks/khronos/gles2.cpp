@@ -2497,9 +2497,30 @@ static void bd_trace_draw(const char* what, GLsizei count)
         glad_glGetIntegerv(0x8B8D /*GL_CURRENT_PROGRAM*/, &program);
         glad_glGetIntegerv(0x0BA2 /*GL_VIEWPORT*/, viewport);
     }
-    BD_LOG("FB", "swap=%d draw %s count=%d program=%d fbo=%d vp=[%d %d %d %d]",
+    GLint depth_mask = -1, color_mask[4] = {-1, -1, -1, -1}, depth_func = -1;
+    GLint scissor_box[4] = {0, 0, 0, 0};
+    GLboolean caps[5] = {0, 0, 0, 0, 0};
+    if (fbo == 0 && glad_glGetIntegerv && glad_glGetBooleanv) {
+        glad_glGetIntegerv(0x0B72 /*GL_DEPTH_WRITEMASK*/, &depth_mask);
+        glad_glGetIntegerv(0x0C23 /*GL_COLOR_WRITEMASK*/, color_mask);
+        glad_glGetIntegerv(0x0B74 /*GL_DEPTH_FUNC*/, &depth_func);
+        glad_glGetIntegerv(0x0C10 /*GL_SCISSOR_BOX*/, scissor_box);
+        glad_glGetBooleanv(0x0B71 /*GL_DEPTH_TEST*/, &caps[0]);
+        glad_glGetBooleanv(0x0BE2 /*GL_BLEND*/, &caps[1]);
+        glad_glGetBooleanv(0x0B44 /*GL_CULL_FACE*/, &caps[2]);
+        glad_glGetBooleanv(0x0C11 /*GL_SCISSOR_TEST*/, &caps[3]);
+        glad_glGetBooleanv(0x0B90 /*GL_STENCIL_TEST*/, &caps[4]);
+    }
+    BD_LOG("FB",
+           "swap=%d draw %s count=%d program=%d fbo=%d vp=[%d %d %d %d] "
+           "depth=%d func=0x%x dmask=%d cmask=%d%d%d%d blend=%d cull=%d "
+           "scissor=%d box=[%d %d %d %d] stencil=%d",
            g_bd_swap_index, what, (int)count, (int)program, (int)fbo, viewport[0],
-           viewport[1], viewport[2], viewport[3]);
+           viewport[1], viewport[2], viewport[3], (int)caps[0],
+           (unsigned)depth_func, (int)depth_mask, (int)color_mask[0],
+           (int)color_mask[1], (int)color_mask[2], (int)color_mask[3],
+           (int)caps[1], (int)caps[2], (int)caps[3], scissor_box[0],
+           scissor_box[1], scissor_box[2], scissor_box[3], (int)caps[4]);
 }
 
 // Debug (BD_SCREEN_NO_DEPTH=1): draws into the default framebuffer run with
@@ -2516,14 +2537,30 @@ static bool bd_screen_no_depth_enabled()
     return enabled;
 }
 
+static bool bd_screen_relax_enabled()
+{
+    static const bool enabled = [] {
+        const char* value = getenv("BD_SCREEN_RELAX");
+        return value && *value && strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
 struct BdScreenDepthRelax {
     bool applied = false;
+    bool relax = false;
     GLboolean depth = 1;
     GLboolean stencil = 0;
+    GLboolean scissor = 0;
+    GLboolean cull = 0;
+    GLboolean blend = 0;
+    GLboolean mask[4] = {1, 1, 1, 1};
 
     explicit BdScreenDepthRelax(GLint fbo)
     {
-        if (!bd_screen_no_depth_enabled() || fbo != 0 || !glad_glIsEnabled)
+        relax = bd_screen_relax_enabled();
+        if ((!bd_screen_no_depth_enabled() && !relax) || fbo != 0 ||
+            !glad_glIsEnabled)
             return;
         depth = glad_glIsEnabled(0x0B71 /*GL_DEPTH_TEST*/);
         stencil = glad_glIsEnabled(0x0B90 /*GL_STENCIL_TEST*/);
@@ -2531,6 +2568,22 @@ struct BdScreenDepthRelax {
             glad_glDisable(0x0B71);
         if (stencil)
             glad_glDisable(0x0B90);
+        if (relax) {
+            scissor = glad_glIsEnabled(0x0C11 /*GL_SCISSOR_TEST*/);
+            cull = glad_glIsEnabled(0x0B44 /*GL_CULL_FACE*/);
+            blend = glad_glIsEnabled(0x0BE2 /*GL_BLEND*/);
+            if (scissor)
+                glad_glDisable(0x0C11);
+            if (cull)
+                glad_glDisable(0x0B44);
+            if (blend)
+                glad_glDisable(0x0BE2);
+            if (glad_glGetBooleanv && glad_glColorMask) {
+                glad_glGetBooleanv(0x0C23 /*GL_COLOR_WRITEMASK*/, mask);
+                if (!mask[0] || !mask[1] || !mask[2] || !mask[3])
+                    glad_glColorMask(1, 1, 1, 1);
+            }
+        }
         applied = true;
     }
 
@@ -2542,6 +2595,17 @@ struct BdScreenDepthRelax {
             glad_glEnable(0x0B71);
         if (stencil)
             glad_glEnable(0x0B90);
+        if (relax) {
+            if (scissor)
+                glad_glEnable(0x0C11);
+            if (cull)
+                glad_glEnable(0x0B44);
+            if (blend)
+                glad_glEnable(0x0BE2);
+            if (glad_glColorMask &&
+                (!mask[0] || !mask[1] || !mask[2] || !mask[3]))
+                glad_glColorMask(mask[0], mask[1], mask[2], mask[3]);
+        }
     }
 };
 
@@ -3075,6 +3139,7 @@ static void bd_probe_end(const char* what, GLsizei count)
     size_t covered = 0;
     size_t nonblack = 0;
     uint64_t sr = 0, sg = 0, sb = 0;
+    int minx = g_probe.width, maxx = -1, miny = g_probe.height, maxy = -1;
     for (size_t p = 0; p < pixels.size(); p += 4) {
         // Magenta fill with a fully opaque colour mask reads back at exactly
         // 255/0/255; require all three to call a pixel untouched.
@@ -3086,15 +3151,24 @@ static void bd_probe_end(const char* what, GLsizei count)
         sb += pixels[p + 2];
         if (pixels[p] | pixels[p + 1] | pixels[p + 2])
             ++nonblack;
+        if (g_probe.width > 0) {
+            const int x = (int)((p / 4) % (size_t)g_probe.width);
+            const int y = (int)((p / 4) / (size_t)g_probe.width);
+            if (x < minx) minx = x;
+            if (x > maxx) maxx = x;
+            if (y < miny) miny = y;
+            if (y > maxy) maxy = y;
+        }
     }
     BD_LOG("CENSUS",
            "probe %s fbo=%d program=%d %dx%d count=%d covered=%zu/%zu "
-           "nonblack=%zu meanRGB=%llu,%llu,%llu err=0x%x",
+           "nonblack=%zu meanRGB=%llu,%llu,%llu bbox=[%d,%d..%d,%d] err=0x%x",
            what, (int)g_probe.fbo, (int)g_probe.program, g_probe.width,
            g_probe.height, (int)count, covered, pixels.size() / 4, nonblack,
            (unsigned long long)(covered ? sr / covered : 0),
            (unsigned long long)(covered ? sg / covered : 0),
-           (unsigned long long)(covered ? sb / covered : 0), (unsigned)read_error);
+           (unsigned long long)(covered ? sb / covered : 0), minx, miny, maxx,
+           maxy, (unsigned)read_error);
     // BD_PROBE_DUMP=<prefix>: keep the sampled target, so a partial "covered"
     // count can be read as a location instead of a number.
     const char* dump_prefix = getenv("BD_PROBE_DUMP");
